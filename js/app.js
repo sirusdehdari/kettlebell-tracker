@@ -577,20 +577,26 @@ function renderMuscles() {
 
 // ---------- HISTORY VIEW ----------
 
+const RANGE_PRESETS = [[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y'], [Infinity, 'All']];
+
+function renderRangeChips(activeRangeDays) {
+  return `<div class="range-chips">
+    ${RANGE_PRESETS.map(([val, label]) => `<button class="chip ${activeRangeDays === val ? 'active' : ''}" data-range="${val === Infinity ? 'inf' : val}">${label}</button>`).join('')}
+  </div>`;
+}
+
 function renderHistory() {
   const exercisesWithHistory = getAllExerciseIdsWithHistory(state);
   if (!historyViewState.exerciseId && exercisesWithHistory.length) historyViewState.exerciseId = exercisesWithHistory[0];
   const wvl = getWeekVsLastWeek(state);
   const heatmapData = getHeatmapData(state);
+  const visibleHistory = filterByRange(state.history, historyViewState.rangeDays).sort((a, b) => b.date.localeCompare(a.date));
 
   const chartSection = historyViewState.exerciseId ? `
     <div class="section-title">Weight trend — ${state.exercises[historyViewState.exerciseId]?.name || ''}</div>
     <select class="field" id="history-exercise-select" style="margin-bottom:8px">
       ${exercisesWithHistory.map(id => `<option value="${id}" ${id === historyViewState.exerciseId ? 'selected' : ''}>${state.exercises[id]?.name || id}</option>`).join('')}
     </select>
-    <div class="range-chips">
-      ${[[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y'], [Infinity, 'All']].map(([val, label]) => `<button class="chip ${historyViewState.rangeDays === val ? 'active' : ''}" data-range="${val === Infinity ? 'inf' : val}">${label}</button>`).join('')}
-    </div>
     ${renderLineChart(getExerciseWeightSeries(state, historyViewState.exerciseId), { rangeDays: historyViewState.rangeDays })}
   ` : '<p class="empty-state">Log a session to start seeing trends.</p>';
 
@@ -602,6 +608,9 @@ function renderHistory() {
 
   return `
     <h2>History</h2>
+    <div class="section-title" style="margin-top:0">Time period</div>
+    ${renderRangeChips(historyViewState.rangeDays)}
+
     <div class="week-compare">
       <div class="wc-box"><div class="wc-num">${wvl.thisWeekSessions}</div><div class="wc-label">Sessions this week</div></div>
       <div class="wc-box"><div class="wc-num">${wvl.lastWeekSessions}</div><div class="wc-label">Last week</div></div>
@@ -614,9 +623,9 @@ function renderHistory() {
 
     ${prSection ? `<div class="section-title">Personal records</div>${prSection}` : ''}
 
-    <div class="section-title">Log</div>
-    ${state.history.length === 0 ? '<p class="empty-state">No sessions logged yet.</p>' :
-      [...state.history].sort((a, b) => b.date.localeCompare(a.date)).map(h => `
+    <div class="section-title">Log (${historyViewState.rangeDays === Infinity ? 'all time' : RANGE_PRESETS.find(([v]) => v === historyViewState.rangeDays)[1]})</div>
+    ${visibleHistory.length === 0 ? '<p class="empty-state">No sessions logged in this time period.</p>' :
+      visibleHistory.map(h => `
         <div class="history-entry">
           <div class="he-top"><span>${DAY_LABELS[h.dayOfWeek]}</span><span>${h.date}</span></div>
           <div class="he-sub">${h.complexSnapshot ? `KB @ ${h.complexSnapshot.targetWeightKg}kg — ${h.complexSnapshot.exercises.map(e => `${e.name} (${e.weightKg}kg)`).join(', ')}` : ''}</div>
