@@ -90,7 +90,7 @@ button.link-btn {
 }
 button.danger-btn { color: #922B21; }
 
-input[type="text"], input[type="number"], select.field {
+input[type="text"], input[type="number"], input[type="date"], select.field {
   width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
   font-family: 'Inter', sans-serif; font-size: 0.9rem; background: white;
 }

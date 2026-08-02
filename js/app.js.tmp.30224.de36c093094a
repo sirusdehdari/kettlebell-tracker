@@ -311,7 +311,6 @@ function renderDayDetail(dayKey) {
 
     ${day.complex ? `
     <div class="section-title" style="margin-top:20px">Kettlebell complex — ${day.complex.targetWeightKg}kg</div>
-    ${day.complex.positionOverride ? `<span class="pill status-future">🧎 Whole routine: ${POSITION_LABELS[day.complex.positionOverride]}</span>` : ''}
     ${exerciseRows}
     ` : '<div class="empty-state">No kettlebell complex scheduled this day.</div>'}
 
@@ -483,7 +482,7 @@ function openLogModal(dayKey) {
     <p class="modal-title">Log ${DAY_LABELS[dayKey]}</p>
     <div class="modal-section">
       <p class="modal-section-title">Date</p>
-      <input type="date" class="field" id="log-date" value="${dateDefault}">
+      <input type="text" class="field" id="log-date" value="${dateDefault}" placeholder="YYYY-MM-DD">
     </div>
     ${day.complex ? `<div class="modal-section"><p class="modal-section-title">Weight used per exercise</p>${exerciseFields}</div>` : ''}
     ${day.activities.length ? `<div class="modal-section"><p class="modal-section-title">Activities</p>${activityFields}</div>` : ''}
