@@ -444,6 +444,8 @@ function openActivitiesEditorModal(dayKey) {
 
 // ---------- LOG TODAY / LOG DAY ----------
 
+const DEFAULT_ROUNDS_COMPLETED = 5;
+
 function openLogModal(dayKey) {
   const day = state.schedule[dayKey];
   const dateDefault = todayStr();
@@ -485,7 +487,19 @@ function openLogModal(dayKey) {
       <p class="modal-section-title">Date</p>
       <input type="date" class="field" id="log-date" value="${dateDefault}">
     </div>
-    ${day.complex ? `<div class="modal-section"><p class="modal-section-title">Weight used per exercise</p>${exerciseFields}</div>` : ''}
+    ${day.complex ? `
+    <div class="modal-section">
+      <p class="modal-section-title">Weight used per exercise</p>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+        <input type="number" class="field" id="log-weight-all" value="${day.complex.targetWeightKg}" step="1" style="flex:1">
+        <button type="button" class="chip" id="log-weight-all-btn">Apply to all</button>
+      </div>
+      ${exerciseFields}
+    </div>
+    <div class="modal-section">
+      <p class="modal-section-title">Rounds completed</p>
+      <input type="number" class="field" id="log-rounds" min="1" step="1" value="${DEFAULT_ROUNDS_COMPLETED}">
+    </div>` : ''}
     ${day.activities.length ? `<div class="modal-section"><p class="modal-section-title">Activities</p>${activityFields}</div>` : ''}
     <div class="modal-section">
       <p class="modal-section-title">Notes</p>
@@ -497,6 +511,13 @@ function openLogModal(dayKey) {
   `;
   openModal(html);
 
+  const weightAllBtn = document.getElementById('log-weight-all-btn');
+  if (weightAllBtn) weightAllBtn.addEventListener('click', () => {
+    const v = document.getElementById('log-weight-all').value;
+    if (v === '') return;
+    document.querySelectorAll('[data-log-exercise]').forEach(el => { el.value = v; });
+  });
+
   document.getElementById('log-save-btn').addEventListener('click', () => {
     const date = document.getElementById('log-date').value.trim() || dateDefault;
     let complexSnapshot = null;
@@ -507,7 +528,8 @@ function openLogModal(dayKey) {
           weightKg: Number(document.querySelector(`[data-log-exercise="${exId}"]`).value) || 0
         })),
         targetWeightKg: day.complex.targetWeightKg,
-        focusNote: day.complex.focusNote
+        focusNote: day.complex.focusNote,
+        roundsCompleted: Number(document.getElementById('log-rounds').value) || DEFAULT_ROUNDS_COMPLETED
       };
     }
     const activitiesSnapshot = day.activities
@@ -527,6 +549,104 @@ function openLogModal(dayKey) {
       complexSnapshot, activitiesSnapshot,
       note: document.getElementById('log-notes').value.trim()
     });
+    saveState(); closeModal(); render();
+  });
+}
+
+// ---------- EDIT / DELETE A LOGGED SESSION ----------
+
+function openEditHistoryModal(historyId) {
+  const h = state.history.find(x => x.id === historyId);
+  if (!h) return;
+
+  const exerciseFields = h.complexSnapshot ? h.complexSnapshot.exercises.map(e => `
+    <div class="exercise-row">
+      <div class="ex-main"><div class="ex-name">${e.name}</div></div>
+      <div class="ex-weight"><input type="number" class="field" data-edit-exercise="${e.exerciseId}" value="${e.weightKg}" step="1"> kg</div>
+    </div>`).join('') : '';
+
+  const activityFields = h.activitiesSnapshot.map((a, idx) => {
+    const cfg = state.activities[a.activityId]?.logFields || {};
+    const fieldInputs = [];
+    if (cfg.weight || 'weightKg' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-edit-activity-field="${idx}:weight" value="${a.fields.weightKg ?? ''}" step="1"></label>`);
+    if (cfg.duration || 'durationMin' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-edit-activity-field="${idx}:duration" value="${a.fields.durationMin ?? ''}" step="1"></label>`);
+    if (cfg.distance || 'distanceKm' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-edit-activity-field="${idx}:distance" value="${a.fields.distanceKm ?? ''}" step="0.1"></label>`);
+    if (cfg.pace || 'pace' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-edit-activity-field="${idx}:pace" value="${a.fields.pace ?? ''}" placeholder="5:30/km"></label>`);
+    return `
+      <div class="activity-row" style="align-items:flex-start">
+        <div class="act-main">
+          <div class="act-name">${a.name}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${fieldInputs.join('')}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const html = `
+    <p class="modal-title">Edit session</p>
+    <p class="modal-sub">${DAY_LABELS[h.dayOfWeek]}</p>
+    <div class="modal-section">
+      <p class="modal-section-title">Date</p>
+      <input type="date" class="field" id="edit-log-date" value="${h.date}">
+    </div>
+    ${h.complexSnapshot ? `
+    <div class="modal-section">
+      <p class="modal-section-title">Weight used per exercise</p>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+        <input type="number" class="field" id="edit-log-weight-all" placeholder="Set all to…" step="1" style="flex:1">
+        <button type="button" class="chip" id="edit-log-weight-all-btn">Apply to all</button>
+      </div>
+      ${exerciseFields}
+    </div>
+    <div class="modal-section">
+      <p class="modal-section-title">Rounds completed</p>
+      <input type="number" class="field" id="edit-log-rounds" min="1" step="1" value="${h.complexSnapshot.roundsCompleted ?? DEFAULT_ROUNDS_COMPLETED}">
+    </div>` : ''}
+    ${h.activitiesSnapshot.length ? `<div class="modal-section"><p class="modal-section-title">Activities</p>${activityFields}</div>` : ''}
+    <div class="modal-section">
+      <p class="modal-section-title">Notes</p>
+      <textarea class="field" id="edit-log-notes">${h.note || ''}</textarea>
+    </div>
+    <div class="modal-section">
+      <button class="chip active" style="width:100%;padding:10px" id="edit-log-save-btn">Save changes</button>
+    </div>
+    <div class="modal-section">
+      <button style="width:100%;padding:10px;background:none;border:none;color:#922B21;font-family:'Inter',sans-serif" id="edit-log-delete-btn">Delete session</button>
+    </div>
+  `;
+  openModal(html);
+
+  const weightAllBtn = document.getElementById('edit-log-weight-all-btn');
+  if (weightAllBtn) weightAllBtn.addEventListener('click', () => {
+    const v = document.getElementById('edit-log-weight-all').value;
+    if (v === '') return;
+    document.querySelectorAll('[data-edit-exercise]').forEach(el => { el.value = v; });
+  });
+
+  document.getElementById('edit-log-save-btn').addEventListener('click', () => {
+    h.date = document.getElementById('edit-log-date').value || h.date;
+    if (h.complexSnapshot) {
+      h.complexSnapshot.exercises.forEach(e => {
+        e.weightKg = Number(document.querySelector(`[data-edit-exercise="${e.exerciseId}"]`).value) || 0;
+      });
+      h.complexSnapshot.roundsCompleted = Number(document.getElementById('edit-log-rounds').value) || DEFAULT_ROUNDS_COMPLETED;
+    }
+    h.activitiesSnapshot.forEach((a, idx) => {
+      const wEl = document.querySelector(`[data-edit-activity-field="${idx}:weight"]`);
+      const dEl = document.querySelector(`[data-edit-activity-field="${idx}:duration"]`);
+      const distEl = document.querySelector(`[data-edit-activity-field="${idx}:distance"]`);
+      const pEl = document.querySelector(`[data-edit-activity-field="${idx}:pace"]`);
+      if (wEl) a.fields.weightKg = Number(wEl.value) || undefined;
+      if (dEl) a.fields.durationMin = Number(dEl.value) || undefined;
+      if (distEl) a.fields.distanceKm = Number(distEl.value) || undefined;
+      if (pEl) a.fields.pace = pEl.value || undefined;
+    });
+    h.note = document.getElementById('edit-log-notes').value.trim();
+    saveState(); closeModal(); render();
+  });
+
+  document.getElementById('edit-log-delete-btn').addEventListener('click', () => {
+    if (!confirm('Delete this logged session? This cannot be undone.')) return;
+    state.history = state.history.filter(x => x.id !== historyId);
     saveState(); closeModal(); render();
   });
 }
@@ -633,15 +753,15 @@ function renderHistory() {
 
     ${prSection ? `<div class="section-title">Personal records</div>${prSection}` : ''}
 
-    <div class="section-title">Log (${historyViewState.rangeDays === Infinity ? 'all time' : RANGE_PRESETS.find(([v]) => v === historyViewState.rangeDays)[1]})</div>
+    <div class="section-title">Log (${historyViewState.rangeDays === Infinity ? 'all time' : RANGE_PRESETS.find(([v]) => v === historyViewState.rangeDays)[1]}) <span style="font-weight:400;text-transform:none;letter-spacing:normal">— tap to edit</span></div>
     ${visibleHistory.length === 0 ? '<p class="empty-state">No sessions logged in this time period.</p>' :
       visibleHistory.map(h => `
-        <div class="history-entry">
+        <button type="button" class="history-entry" data-history-id="${h.id}">
           <div class="he-top"><span>${DAY_LABELS[h.dayOfWeek]}</span><span>${h.date}</span></div>
-          <div class="he-sub">${h.complexSnapshot ? `KB @ ${h.complexSnapshot.targetWeightKg}kg — ${h.complexSnapshot.exercises.map(e => `${e.name} (${e.weightKg}kg)`).join(', ')}` : ''}</div>
+          <div class="he-sub">${h.complexSnapshot ? `KB @ ${h.complexSnapshot.targetWeightKg}kg × ${h.complexSnapshot.roundsCompleted ?? DEFAULT_ROUNDS_COMPLETED} rounds — ${h.complexSnapshot.exercises.map(e => `${e.name} (${e.weightKg}kg)`).join(', ')}` : ''}</div>
           ${h.activitiesSnapshot.length ? `<div class="he-sub">${h.activitiesSnapshot.map(a => a.name).join(', ')}</div>` : ''}
           ${h.note ? `<div class="he-note">"${h.note}"</div>` : ''}
-        </div>
+        </button>
       `).join('')}
   `;
 }
@@ -991,6 +1111,7 @@ function attachViewHandlers() {
     historyViewState.rangeDays = el.dataset.range === 'inf' ? Infinity : Number(el.dataset.range);
     render();
   }));
+  document.querySelectorAll('[data-history-id]').forEach(el => el.addEventListener('click', () => openEditHistoryModal(el.dataset.historyId)));
 
   // More
   const addPendingBtn = document.getElementById('add-pending-btn');

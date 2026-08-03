@@ -232,7 +232,7 @@ svg.bodymap .muscle-layer [data-muscle] { stroke: rgba(255,255,255,0.6); stroke-
 .week-compare .wc-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
 
 /* ── HISTORY LOG LIST ── */
-.history-entry { background: white; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; }
+.history-entry { display: block; width: 100%; text-align: left; font-family: 'Inter', sans-serif; background: white; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; }
 .history-entry .he-top { display: flex; justify-content: space-between; font-size: 0.85rem; font-weight: 600; }
 .history-entry .he-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
 .history-entry .he-note { font-size: 0.8rem; margin-top: 6px; font-style: italic; color: var(--iron); }
