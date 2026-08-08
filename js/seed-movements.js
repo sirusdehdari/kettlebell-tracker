@@ -44,6 +44,11 @@ const MOVEMENTS = {
     primaryMuscles: ['lats', 'rear-delts'], secondaryMuscles: ['biceps', 'forearms', 'traps'],
     equipment: 'two-kb', position: 'standing'
   },
+  'ballistic-row': {
+    id: 'ballistic-row', name: 'Ballistic row',
+    primaryMuscles: ['lats', 'rear-delts'], secondaryMuscles: ['biceps', 'forearms', 'glutes', 'hamstrings'],
+    equipment: 'single-kb', position: 'standing'
+  },
   'high-pull': {
     id: 'high-pull', name: 'High pull',
     primaryMuscles: ['traps', 'rear-delts'], secondaryMuscles: ['biceps', 'forearms'],

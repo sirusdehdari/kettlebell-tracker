@@ -18,6 +18,10 @@ const EXERCISES = {
     id: 'gorilla-rows', name: 'Gorilla rows', movementIds: ['gorilla-row'],
     status: 'active', blockerNote: null, replacesExerciseId: null
   },
+  'ballistic-rows': {
+    id: 'ballistic-rows', name: 'Ballistic rows', movementIds: ['ballistic-row'],
+    status: 'active', blockerNote: null, replacesExerciseId: null
+  },
   'high-pull-ex': {
     id: 'high-pull-ex', name: 'High pull', movementIds: ['high-pull'],
     status: 'active', blockerNote: null, replacesExerciseId: null

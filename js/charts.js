@@ -38,31 +38,20 @@ function renderLineChart(series, opts = {}) {
     </svg>`;
 }
 
-// dateValueMap: { 'YYYY-MM-DD': true }, weeks: number of week-columns.
-function renderHeatmap(dateValueMap, opts = {}) {
-  const { weeks = 18 } = opts;
-  const cellSize = 13, gap = 3;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const totalDays = weeks * 7;
-  const start = new Date(today.getTime() - (totalDays - 1) * 86400000);
-  // Align start to a Monday so columns read as clean weeks.
-  const startDow = (start.getDay() + 6) % 7; // 0=mon
-  start.setDate(start.getDate() - startDow);
-
-  const cells = [];
-  for (let w = 0; w < weeks + 1; w++) {
-    for (let d = 0; d < 7; d++) {
-      const date = new Date(start.getTime() + (w * 7 + d) * 86400000);
-      if (date > today) continue;
-      const key = date.toISOString().slice(0, 10);
-      const trained = !!dateValueMap[key];
-      const x = w * (cellSize + gap);
-      const y = d * (cellSize + gap);
-      cells.push(`<rect x="${x}" y="${y}" width="${cellSize}" height="${cellSize}" rx="3" class="${trained ? 'heatmap-on' : 'heatmap-off'}"><title>${key}${trained ? ' — trained' : ''}</title></rect>`);
-    }
-  }
-  const svgWidth = (weeks + 1) * (cellSize + gap);
-  const svgHeight = 7 * (cellSize + gap);
-  return `<svg viewBox="0 0 ${svgWidth} ${svgHeight}" class="heatmap">${cells.join('')}</svg>`;
+// A horizontal, scrollable, chronological row of clickable "ticks" — one per
+// logged session, oldest to newest. Each tick reuses the data-history-id
+// attribute that app.js already wires up generically to open the session's
+// edit/detail popup, so no separate click-handling code is needed here.
+function renderTimeline(entries) {
+  if (entries.length === 0) return '<p class="empty-state">No sessions logged in this time period.</p>';
+  const sorted = [...entries].sort((a, b) => a.date.localeCompare(b.date));
+  const ticks = sorted.map(h => {
+    const kind = h.complexSnapshot ? 'kb' : 'activity';
+    const shortLabel = h.date.slice(5).replace('-', '/');
+    return `<button type="button" class="timeline-tick" data-history-id="${h.id}">
+      <span class="tick-dot tick-${kind}"></span>
+      <span class="tick-date">${shortLabel}</span>
+    </button>`;
+  }).join('');
+  return `<div class="timeline-scroll"><div class="timeline-track">${ticks}</div></div>`;
 }

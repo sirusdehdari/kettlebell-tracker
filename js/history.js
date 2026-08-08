@@ -19,16 +19,16 @@ function getPersonalRecord(series) {
   return series.reduce((best, p) => (!best || p.value > best.value ? p : best), null);
 }
 
-function getHeatmapData(state) {
-  return Object.fromEntries(state.history.map(h => [h.date, true]));
-}
-
+// Real calendar weeks (Monday-Sunday, matching DAY_ORDER), not a rolling
+// "last 7 days" window — a rolling window doesn't match what "this week"
+// means to the user and was a source of confusion.
 function getWeekVsLastWeek(state) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const cutoffThis = new Date(today.getTime() - 7 * 86400000);
-  const cutoffLast = new Date(today.getTime() - 14 * 86400000);
-  const thisWeek = state.history.filter(h => new Date(h.date) >= cutoffThis);
-  const lastWeek = state.history.filter(h => new Date(h.date) >= cutoffLast && new Date(h.date) < cutoffThis);
+  const dow = (today.getDay() + 6) % 7; // 0 = Monday
+  const startOfThisWeek = new Date(today.getTime() - dow * 86400000);
+  const startOfLastWeek = new Date(startOfThisWeek.getTime() - 7 * 86400000);
+  const thisWeek = state.history.filter(h => new Date(h.date) >= startOfThisWeek);
+  const lastWeek = state.history.filter(h => new Date(h.date) >= startOfLastWeek && new Date(h.date) < startOfThisWeek);
   const totalLoad = entries => entries.reduce((sum, h) => sum + (h.complexSnapshot ? h.complexSnapshot.targetWeightKg : 0), 0);
   return {
     thisWeekSessions: thisWeek.length, lastWeekSessions: lastWeek.length,

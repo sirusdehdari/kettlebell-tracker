@@ -68,6 +68,7 @@ function renderMuscleSummary(primarySet, secondarySet) {
 }
 
 function exerciseSubLabel(exercise) {
+  if (exercise.movementIds.length === 0) return 'Custom exercise — no muscle data';
   return exercise.movementIds.map(id => (state.movements[id] || {}).name || '?').join(' → ');
 }
 
@@ -136,20 +137,37 @@ function wireOrderedPicker(config) {
       .filter(item => !q || config.getName(item).toLowerCase().includes(q))
       .sort((a, b) => config.getName(a).localeCompare(config.getName(b)))
       .slice(0, 30);
-    config.resultsEl.innerHTML = matches.map(item => `
+
+    const exactMatch = q && matches.some(item => config.getName(item).toLowerCase() === q);
+    const createHtml = (config.allowCreate && q && !exactMatch)
+      ? `<button type="button" class="picker-search-result create-result" data-create="1">+ Create "${query.trim()}"${config.allowCreate.hint ? `<div class="result-sub">${config.allowCreate.hint}</div>` : ''}</button>`
+      : '';
+
+    const matchesHtml = matches.map(item => `
       <button type="button" class="picker-search-result" data-id="${item.id}">
         ${config.getName(item)}
         ${config.getSub ? `<div class="result-sub">${config.getSub(item)}</div>` : ''}
       </button>
-    `).join('') || '<p class="empty-state" style="padding:10px">No matches.</p>';
+    `).join('');
 
-    config.resultsEl.querySelectorAll('.picker-search-result').forEach(btn => {
+    config.resultsEl.innerHTML = (createHtml + matchesHtml) || '<p class="empty-state" style="padding:10px">No matches.</p>';
+
+    config.resultsEl.querySelectorAll('.picker-search-result[data-id]').forEach(btn => {
       btn.addEventListener('click', () => {
         if (config.maxItems && current.length >= config.maxItems) return;
         current.push({ id: btn.dataset.id, extra: config.extraField ? config.extraField.default : undefined });
         if (config.searchInputEl) config.searchInputEl.value = '';
         renderRows(); renderResults(''); fireChange();
       });
+    });
+
+    const createBtn = config.resultsEl.querySelector('[data-create]');
+    if (createBtn) createBtn.addEventListener('click', () => {
+      if (config.maxItems && current.length >= config.maxItems) return;
+      const entry = config.allowCreate.onCreate(query.trim());
+      current.push({ ...entry, extra: entry.extra !== undefined ? entry.extra : (config.extraField ? config.extraField.default : undefined) });
+      if (config.searchInputEl) config.searchInputEl.value = '';
+      renderRows(); renderResults(''); fireChange();
     });
   }
 
@@ -171,6 +189,94 @@ function wireOrderedPicker(config) {
   renderResults('');
 
   return { getList: () => current.map(x => ({ ...x })) };
+}
+
+// ---------- ACTIVITY FIELD EDITOR (search-to-add + editable log fields) ----------
+// Used both for adding a one-off activity while logging (without touching the
+// day's permanent schedule) and for editing an already-logged session's
+// activities (values, or adding one that was forgotten at the time).
+
+function activityFieldInputsHtml(act, cfg, values, idx) {
+  const inputs = [];
+  if (cfg.weight) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-af="${idx}:weight" value="${values.weightKg ?? ''}" step="1"></label>`);
+  if (cfg.reps) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">reps<input type="number" class="field" data-af="${idx}:reps" value="${values.reps ?? ''}" step="1"></label>`);
+  if (cfg.duration) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-af="${idx}:duration" value="${values.durationMin ?? ''}" step="1"></label>`);
+  if (cfg.distance) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-af="${idx}:distance" value="${values.distanceKm ?? ''}" step="0.1"></label>`);
+  if (cfg.pace) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-af="${idx}:pace" value="${values.pace ?? ''}" placeholder="5:30/km"></label>`);
+  return inputs.join('');
+}
+
+function activityLogFieldsConfig(a) {
+  // Prefer the activity's current library config; fall back to whatever
+  // fields are already present on an older snapshot if the activity was
+  // since edited or removed from the library.
+  const libCfg = state.activities[a.activityId]?.logFields;
+  if (libCfg) return libCfg;
+  return {
+    weight: 'weightKg' in a.fields, reps: 'reps' in a.fields,
+    duration: 'durationMin' in a.fields, distance: 'distanceKm' in a.fields, pace: 'pace' in a.fields
+  };
+}
+
+function wireActivityFieldEditor(containerEl, initialEntries, searchEl, resultsEl) {
+  let entries = initialEntries.map(e => ({ ...e, fields: { ...e.fields } }));
+
+  function renderRows() {
+    containerEl.innerHTML = entries.map((a, idx) => {
+      const cfg = activityLogFieldsConfig(a);
+      return `<div class="activity-row" style="align-items:flex-start">
+        <div class="act-main">
+          <div class="act-name">${a.name}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${activityFieldInputsHtml(state.activities[a.activityId], cfg, a.fields, idx)}</div>
+        </div>
+        <button type="button" class="remove-btn" data-remove-af="${idx}">✕</button>
+      </div>`;
+    }).join('') || '<p class="empty-state" style="padding:10px">Nothing added yet.</p>';
+
+    containerEl.querySelectorAll('[data-remove-af]').forEach(btn => btn.addEventListener('click', () => {
+      entries.splice(Number(btn.dataset.removeAf), 1);
+      renderRows();
+      if (searchEl) renderResults(searchEl.value);
+    }));
+  }
+
+  function renderResults(query) {
+    if (!resultsEl) return;
+    const pickedIds = new Set(entries.map(e => e.activityId));
+    const q = (query || '').trim().toLowerCase();
+    const matches = Object.values(state.activities)
+      .filter(a => !pickedIds.has(a.id))
+      .filter(a => !q || a.name.toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 20);
+    resultsEl.innerHTML = matches.map(a => `
+      <button type="button" class="picker-search-result" data-id="${a.id}">${a.name}<div class="result-sub">${CATEGORY_LABELS[a.category]}</div></button>
+    `).join('') || '<p class="empty-state" style="padding:10px">No matches.</p>';
+    resultsEl.querySelectorAll('.picker-search-result').forEach(btn => btn.addEventListener('click', () => {
+      const act = state.activities[btn.dataset.id];
+      entries.push({ activityId: act.id, name: act.name, category: act.category, timing: 'standalone', fields: {} });
+      if (searchEl) searchEl.value = '';
+      renderRows(); renderResults('');
+    }));
+  }
+
+  if (searchEl) searchEl.addEventListener('input', () => renderResults(searchEl.value));
+  renderRows();
+  if (resultsEl) renderResults('');
+
+  return {
+    readValues: () => entries.map((a, idx) => {
+      const cfg = activityLogFieldsConfig(a);
+      const fields = {};
+      const get = (k) => document.querySelector(`[data-af="${idx}:${k}"]`);
+      if (cfg.weight) fields.weightKg = Number(get('weight')?.value) || undefined;
+      if (cfg.reps) fields.reps = Number(get('reps')?.value) || undefined;
+      if (cfg.duration) fields.durationMin = Number(get('duration')?.value) || undefined;
+      if (cfg.distance) fields.distanceKm = Number(get('distance')?.value) || undefined;
+      if (cfg.pace) fields.pace = get('pace')?.value || undefined;
+      return { activityId: a.activityId, name: a.name, category: a.category, timing: a.timing, fields };
+    })
+  };
 }
 
 // ---------- NAVIGATION ----------
@@ -376,7 +482,15 @@ function openComplexEditorModal(dayKey) {
     getSub: item => exerciseSubLabel(item),
     filterPredicate: item => item.status === 'active',
     initial: day.complex ? day.complex.exerciseIds.map(id => ({ id })) : [],
-    maxItems: 6
+    maxItems: 6,
+    allowCreate: {
+      hint: 'Custom — no movements/muscle data, but usable in the complex',
+      onCreate: (name) => {
+        const id = uid('exercise');
+        state.exercises[id] = { id, name, movementIds: [], status: 'active', blockerNote: null, replacesExerciseId: null, custom: true };
+        return { id };
+      }
+    }
   });
 
   document.getElementById('complex-save-btn').addEventListener('click', () => {
@@ -465,10 +579,11 @@ function openLogModal(dayKey) {
     if (!act) return '';
     const last = getLastActivityFields(a.activityId);
     const fields = [];
-    if (act.logFields.weight) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-log-activity-field="${a.activityId}:weight" value="${last.weightKg || ''}" step="1"></label>`);
-    if (act.logFields.duration) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-log-activity-field="${a.activityId}:duration" value="${last.durationMin || ''}" step="1"></label>`);
-    if (act.logFields.distance) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-log-activity-field="${a.activityId}:distance" value="${last.distanceKm || ''}" step="0.1"></label>`);
-    if (act.logFields.pace) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-log-activity-field="${a.activityId}:pace" value="${last.pace || ''}" placeholder="5:30/km"></label>`);
+    if (act.logFields.weight) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-log-activity-field="${a.activityId}:weight" value="${last.weightKg ?? ''}" step="1"></label>`);
+    if (act.logFields.reps) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">reps<input type="number" class="field" data-log-activity-field="${a.activityId}:reps" value="${last.reps ?? ''}" step="1"></label>`);
+    if (act.logFields.duration) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-log-activity-field="${a.activityId}:duration" value="${last.durationMin ?? ''}" step="1"></label>`);
+    if (act.logFields.distance) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-log-activity-field="${a.activityId}:distance" value="${last.distanceKm ?? ''}" step="0.1"></label>`);
+    if (act.logFields.pace) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-log-activity-field="${a.activityId}:pace" value="${last.pace ?? ''}" placeholder="5:30/km"></label>`);
     return `
       <div class="activity-row" style="align-items:flex-start">
         <div class="act-main">
@@ -502,6 +617,15 @@ function openLogModal(dayKey) {
     </div>` : ''}
     ${day.activities.length ? `<div class="modal-section"><p class="modal-section-title">Activities</p>${activityFields}</div>` : ''}
     <div class="modal-section">
+      <p class="modal-section-title">Add something extra for today</p>
+      <p class="picker-cap-note" style="margin:0 0 8px">One-off — this only affects today's log, it won't change ${DAY_LABELS[dayKey]}'s permanent schedule.</p>
+      <div class="picker-rows" id="log-adhoc-rows"></div>
+      <div class="picker-search">
+        <input type="text" class="field" id="log-adhoc-search" placeholder="Search activities…">
+        <div class="picker-search-results" id="log-adhoc-results"></div>
+      </div>
+    </div>
+    <div class="modal-section">
       <p class="modal-section-title">Notes</p>
       <textarea class="field" id="log-notes" placeholder="How did it feel?"></textarea>
     </div>
@@ -518,6 +642,11 @@ function openLogModal(dayKey) {
     document.querySelectorAll('[data-log-exercise]').forEach(el => { el.value = v; });
   });
 
+  const adhocEditor = wireActivityFieldEditor(
+    document.getElementById('log-adhoc-rows'), [],
+    document.getElementById('log-adhoc-search'), document.getElementById('log-adhoc-results')
+  );
+
   document.getElementById('log-save-btn').addEventListener('click', () => {
     const date = document.getElementById('log-date').value.trim() || dateDefault;
     let complexSnapshot = null;
@@ -532,17 +661,19 @@ function openLogModal(dayKey) {
         roundsCompleted: Number(document.getElementById('log-rounds').value) || DEFAULT_ROUNDS_COMPLETED
       };
     }
-    const activitiesSnapshot = day.activities
+    const scheduledSnapshot = day.activities
       .filter(a => document.querySelector(`[data-log-activity-include="${a.activityId}"]`)?.checked)
       .map(a => {
         const act = state.activities[a.activityId];
         const fields = {};
         if (act.logFields.weight) fields.weightKg = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:weight"]`)?.value) || undefined;
+        if (act.logFields.reps) fields.reps = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:reps"]`)?.value) || undefined;
         if (act.logFields.duration) fields.durationMin = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:duration"]`)?.value) || undefined;
         if (act.logFields.distance) fields.distanceKm = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:distance"]`)?.value) || undefined;
         if (act.logFields.pace) fields.pace = document.querySelector(`[data-log-activity-field="${a.activityId}:pace"]`)?.value || undefined;
         return { activityId: a.activityId, name: act.name, category: act.category, timing: a.timing, fields };
       });
+    const activitiesSnapshot = scheduledSnapshot.concat(adhocEditor.readValues());
 
     state.history.push({
       id: uid('session'), date, dayOfWeek: dayKey,
@@ -565,22 +696,6 @@ function openEditHistoryModal(historyId) {
       <div class="ex-weight"><input type="number" class="field" data-edit-exercise="${e.exerciseId}" value="${e.weightKg}" step="1"> kg</div>
     </div>`).join('') : '';
 
-  const activityFields = h.activitiesSnapshot.map((a, idx) => {
-    const cfg = state.activities[a.activityId]?.logFields || {};
-    const fieldInputs = [];
-    if (cfg.weight || 'weightKg' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-edit-activity-field="${idx}:weight" value="${a.fields.weightKg ?? ''}" step="1"></label>`);
-    if (cfg.duration || 'durationMin' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-edit-activity-field="${idx}:duration" value="${a.fields.durationMin ?? ''}" step="1"></label>`);
-    if (cfg.distance || 'distanceKm' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-edit-activity-field="${idx}:distance" value="${a.fields.distanceKm ?? ''}" step="0.1"></label>`);
-    if (cfg.pace || 'pace' in a.fields) fieldInputs.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-edit-activity-field="${idx}:pace" value="${a.fields.pace ?? ''}" placeholder="5:30/km"></label>`);
-    return `
-      <div class="activity-row" style="align-items:flex-start">
-        <div class="act-main">
-          <div class="act-name">${a.name}</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${fieldInputs.join('')}</div>
-        </div>
-      </div>`;
-  }).join('');
-
   const html = `
     <p class="modal-title">Edit session</p>
     <p class="modal-sub">${DAY_LABELS[h.dayOfWeek]}</p>
@@ -601,7 +716,14 @@ function openEditHistoryModal(historyId) {
       <p class="modal-section-title">Rounds completed</p>
       <input type="number" class="field" id="edit-log-rounds" min="1" step="1" value="${h.complexSnapshot.roundsCompleted ?? DEFAULT_ROUNDS_COMPLETED}">
     </div>` : ''}
-    ${h.activitiesSnapshot.length ? `<div class="modal-section"><p class="modal-section-title">Activities</p>${activityFields}</div>` : ''}
+    <div class="modal-section">
+      <p class="modal-section-title">Activities</p>
+      <div class="picker-rows" id="edit-log-activity-rows"></div>
+      <div class="picker-search">
+        <input type="text" class="field" id="edit-log-activity-search" placeholder="Add an activity…">
+        <div class="picker-search-results" id="edit-log-activity-results"></div>
+      </div>
+    </div>
     <div class="modal-section">
       <p class="modal-section-title">Notes</p>
       <textarea class="field" id="edit-log-notes">${h.note || ''}</textarea>
@@ -622,6 +744,11 @@ function openEditHistoryModal(historyId) {
     document.querySelectorAll('[data-edit-exercise]').forEach(el => { el.value = v; });
   });
 
+  const activityEditor = wireActivityFieldEditor(
+    document.getElementById('edit-log-activity-rows'), h.activitiesSnapshot,
+    document.getElementById('edit-log-activity-search'), document.getElementById('edit-log-activity-results')
+  );
+
   document.getElementById('edit-log-save-btn').addEventListener('click', () => {
     h.date = document.getElementById('edit-log-date').value || h.date;
     if (h.complexSnapshot) {
@@ -630,16 +757,7 @@ function openEditHistoryModal(historyId) {
       });
       h.complexSnapshot.roundsCompleted = Number(document.getElementById('edit-log-rounds').value) || DEFAULT_ROUNDS_COMPLETED;
     }
-    h.activitiesSnapshot.forEach((a, idx) => {
-      const wEl = document.querySelector(`[data-edit-activity-field="${idx}:weight"]`);
-      const dEl = document.querySelector(`[data-edit-activity-field="${idx}:duration"]`);
-      const distEl = document.querySelector(`[data-edit-activity-field="${idx}:distance"]`);
-      const pEl = document.querySelector(`[data-edit-activity-field="${idx}:pace"]`);
-      if (wEl) a.fields.weightKg = Number(wEl.value) || undefined;
-      if (dEl) a.fields.durationMin = Number(dEl.value) || undefined;
-      if (distEl) a.fields.distanceKm = Number(distEl.value) || undefined;
-      if (pEl) a.fields.pace = pEl.value || undefined;
-    });
+    h.activitiesSnapshot = activityEditor.readValues();
     h.note = document.getElementById('edit-log-notes').value.trim();
     saveState(); closeModal(); render();
   });
@@ -719,7 +837,6 @@ function renderHistory() {
   const exercisesWithHistory = getAllExerciseIdsWithHistory(state);
   if (!historyViewState.exerciseId && exercisesWithHistory.length) historyViewState.exerciseId = exercisesWithHistory[0];
   const wvl = getWeekVsLastWeek(state);
-  const heatmapData = getHeatmapData(state);
   const visibleHistory = filterByRange(state.history, historyViewState.rangeDays).sort((a, b) => b.date.localeCompare(a.date));
 
   const chartSection = historyViewState.exerciseId ? `
@@ -742,12 +859,16 @@ function renderHistory() {
     ${renderRangeChips(historyViewState.rangeDays)}
 
     <div class="week-compare">
-      <div class="wc-box"><div class="wc-num">${wvl.thisWeekSessions}</div><div class="wc-label">Sessions this week</div></div>
-      <div class="wc-box"><div class="wc-num">${wvl.lastWeekSessions}</div><div class="wc-label">Last week</div></div>
+      <div class="wc-box"><div class="wc-num">${wvl.thisWeekSessions}</div><div class="wc-label">This week (Mon–Sun)</div></div>
+      <div class="wc-box"><div class="wc-num">${wvl.lastWeekSessions}</div><div class="wc-label">Last week (Mon–Sun)</div></div>
     </div>
 
-    <div class="section-title">Training frequency</div>
-    ${renderHeatmap(heatmapData)}
+    <div class="section-title">Timeline <span style="font-weight:400;text-transform:none;letter-spacing:normal">— tap a session for details</span></div>
+    ${renderTimeline(visibleHistory)}
+    ${visibleHistory.length ? `<div class="timeline-legend">
+      <span><span class="tick-dot tick-kb" style="display:inline-block;vertical-align:middle;margin-right:5px"></span>Kettlebell session</span>
+      <span><span class="tick-dot tick-activity" style="display:inline-block;vertical-align:middle;margin-right:5px"></span>Activity only</span>
+    </div>` : ''}
 
     ${chartSection}
 
