@@ -21,8 +21,12 @@
 html, body {
   min-height: 100%;
   overflow-x: hidden;
-  overscroll-behavior: none;
 }
+
+/* No rubber-band bounce. Root only: overflow-x above also makes body a
+   (never scrollable) scroll container, and this rule on body stopped the
+   mouse wheel from reaching the page in desktop browsers. */
+html { overscroll-behavior: none; }
 
 body {
   font-family: 'Inter', sans-serif;
