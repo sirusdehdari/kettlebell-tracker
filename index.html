@@ -23,12 +23,8 @@
 
 <div id="view"></div>
 
-<nav class="tabbar">
-  <button data-view="week"><span class="icon">📅</span>Week</button>
-  <button data-view="muscles"><span class="icon">💪</span>Muscles</button>
-  <button data-view="history"><span class="icon">📈</span>History</button>
-  <button data-view="more"><span class="icon">⚙️</span>More</button>
-</nav>
+<!-- One tab per program + Muscles + More, rendered by app.js (renderTabbar). -->
+<nav class="tabbar" id="tabbar"></nav>
 
 <div class="modal-overlay" id="modal-overlay">
   <div class="modal-box">
@@ -43,8 +39,6 @@
 <script src="js/seed-program.js"></script>
 <script src="js/coverage.js"></script>
 <script src="js/warnings.js"></script>
-<script src="js/charts.js"></script>
-<script src="js/history.js"></script>
 <script src="js/bodymap.js"></script>
 <script src="js/app.js"></script>
 </body>

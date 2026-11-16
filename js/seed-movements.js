@@ -7,6 +7,11 @@
 //
 // primaryMuscles/secondaryMuscles values must be keys from MUSCLE_KEYS (muscles.js).
 // equipment must be one of EQUIPMENT_TYPES. position must be one of BODY_POSITIONS.
+//
+// seedVersion: items added after the first release (2026-07) carry
+// seedVersion: 2 (or later). Installs set up before that never received them,
+// so the migration in app.js adds them if missing; first-release items (no
+// seedVersion) that are missing were deleted on purpose and stay deleted.
 
 const MOVEMENTS = {
   'two-hand-swing': {
@@ -47,7 +52,7 @@ const MOVEMENTS = {
   'ballistic-row': {
     id: 'ballistic-row', name: 'Ballistic row',
     primaryMuscles: ['lats', 'rear-delts'], secondaryMuscles: ['biceps', 'forearms', 'glutes', 'hamstrings'],
-    equipment: 'single-kb', position: 'standing'
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
   },
   'high-pull': {
     id: 'high-pull', name: 'High pull',
@@ -229,5 +234,87 @@ const MOVEMENTS = {
     id: 'situp-to-press', name: 'Sit-up to press',
     primaryMuscles: ['abs', 'front-delts'], secondaryMuscles: ['triceps', 'obliques'],
     equipment: 'single-kb', position: 'floor'
+  },
+
+  // ---- Program 2 (2026-11): new movements ----
+  'dead-stop-swing': {
+    id: 'dead-stop-swing', name: 'Dead-stop swing',
+    primaryMuscles: ['glutes', 'hamstrings'], secondaryMuscles: ['lats', 'lower-back', 'forearms', 'abs'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'horn-curl': {
+    id: 'horn-curl', name: 'Curl (horn grip)',
+    primaryMuscles: ['biceps'], secondaryMuscles: ['forearms'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'two-kb-rdl': {
+    id: 'two-kb-rdl', name: 'Romanian deadlift (two KB)',
+    primaryMuscles: ['hamstrings', 'glutes'], secondaryMuscles: ['lower-back', 'forearms', 'traps'],
+    equipment: 'two-kb', position: 'standing', seedVersion: 2
+  },
+  'bench-supported-row': {
+    id: 'bench-supported-row', name: 'Bench-supported single-arm row',
+    primaryMuscles: ['lats', 'rear-delts'], secondaryMuscles: ['biceps', 'forearms', 'traps'],
+    equipment: 'single-kb', position: 'one-knee', seedVersion: 2
+  },
+  'lateral-lunge': {
+    id: 'lateral-lunge', name: 'Lateral lunge',
+    primaryMuscles: ['quads', 'glutes'], secondaryMuscles: ['hamstrings', 'abs'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'triceps-extension-lying': {
+    id: 'triceps-extension-lying', name: 'Triceps extension (lying)',
+    primaryMuscles: ['triceps'], secondaryMuscles: [],
+    equipment: 'single-kb', position: 'floor', seedVersion: 2
+  },
+  pushup: {
+    id: 'pushup', name: 'Pushup (floor)',
+    primaryMuscles: ['chest', 'triceps'], secondaryMuscles: ['front-delts', 'abs'],
+    equipment: 'bodyweight', position: 'floor', seedVersion: 2
+  },
+  'single-arm-row': {
+    id: 'single-arm-row', name: 'Single-arm row (bent-over)',
+    primaryMuscles: ['lats', 'rear-delts'], secondaryMuscles: ['biceps', 'forearms', 'traps', 'obliques'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'goblet-step-up': {
+    id: 'goblet-step-up', name: 'Goblet step-up',
+    primaryMuscles: ['quads', 'glutes'], secondaryMuscles: ['hamstrings', 'abs'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'suitcase-deadlift': {
+    id: 'suitcase-deadlift', name: 'Suitcase deadlift',
+    primaryMuscles: ['glutes', 'quads'], secondaryMuscles: ['obliques', 'hamstrings', 'forearms'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'suitcase-march': {
+    id: 'suitcase-march', name: 'Suitcase march',
+    primaryMuscles: ['obliques', 'hip-flexors'], secondaryMuscles: ['abs', 'forearms', 'quads', 'glutes'],
+    equipment: 'single-kb', position: 'standing', seedVersion: 2
+  },
+  'press-out': {
+    id: 'press-out', name: 'Press-out',
+    primaryMuscles: ['front-delts'], secondaryMuscles: ['chest', 'abs', 'triceps'],
+    equipment: 'single-kb', position: 'kneeling', seedVersion: 2
+  },
+  'half-kneeling-chop': {
+    id: 'half-kneeling-chop', name: 'Half-kneeling chop',
+    primaryMuscles: ['obliques', 'abs'], secondaryMuscles: ['front-delts', 'glutes'],
+    equipment: 'single-kb', position: 'one-knee', seedVersion: 2
+  },
+  'squeeze-press': {
+    id: 'squeeze-press', name: 'Squeeze press (horn grip)',
+    primaryMuscles: ['chest'], secondaryMuscles: ['triceps', 'front-delts'],
+    equipment: 'single-kb', position: 'floor', seedVersion: 2
+  },
+  'close-grip-pushup': {
+    id: 'close-grip-pushup', name: 'Close-grip pushup',
+    primaryMuscles: ['triceps', 'chest'], secondaryMuscles: ['front-delts', 'abs'],
+    equipment: 'bodyweight', position: 'floor', seedVersion: 2
+  },
+  'prone-y-t-w': {
+    id: 'prone-y-t-w', name: 'Prone Y-T-W raise',
+    primaryMuscles: ['rear-delts', 'traps'], secondaryMuscles: ['lower-back', 'side-delts'],
+    equipment: 'bodyweight', position: 'floor', seedVersion: 2
   }
 };

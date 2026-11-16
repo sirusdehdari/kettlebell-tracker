@@ -1,26 +1,27 @@
 // Pure, rule-based advisory warnings — never blocking. Consumes coverage.js
-// output + raw state, returns plain data; app.js is the only place that ever
-// renders these (as small dismissible-for-this-render banners).
+// output + a program view ({ movements, exercises, activities, schedule },
+// built by programView() in app.js), returns plain data; app.js is the only
+// place that ever renders these (a compact badge that opens a popup list).
 // Each warning: { id, severity: 'info'|'warn', scope: 'day'|'week', dayKey, message }
 
 function dayHasComplexOrActivities(day) {
   return !!day.complex || day.activities.length > 0;
 }
 
-function checkDayRedundancy(state, dayKey) {
-  const day = state.schedule[dayKey];
+function checkDayRedundancy(view, dayKey) {
+  const day = view.schedule[dayKey];
   if (!dayHasComplexOrActivities(day)) return [];
   const contributors = {}; // muscleKey -> [labels]
   if (day.complex) {
     day.complex.exerciseIds.forEach(id => {
-      const exercise = state.exercises[id];
+      const exercise = view.exercises[id];
       if (!exercise || exercise.status !== 'active') return;
-      const { primary } = getExerciseMuscles(exercise, state.movements);
+      const { primary } = getExerciseMuscles(exercise, view.movements);
       primary.forEach(m => { (contributors[m] = contributors[m] || []).push(exercise.name); });
     });
   }
   day.activities.forEach(a => {
-    const activity = state.activities[a.activityId];
+    const activity = view.activities[a.activityId];
     if (!activity) return;
     activity.primaryMuscles.forEach(m => { (contributors[m] = contributors[m] || []).push(activity.name); });
   });
@@ -45,27 +46,27 @@ function checkWeeklyGaps(weeklyCoverage) {
     }));
 }
 
-function checkHighImpactClash(state, dayKey) {
-  const day = state.schedule[dayKey];
+function checkHighImpactClash(view, dayKey) {
+  const day = view.schedule[dayKey];
   const highImpact = day.activities
-    .map(a => state.activities[a.activityId])
+    .map(a => view.activities[a.activityId])
     .filter(a => a && a.impactLevel === 'high');
   if (highImpact.length >= 2) {
     return [{
       id: `impact-${dayKey}`, severity: 'warn', scope: 'day', dayKey,
-      message: `${highImpact.map(a => a.name).join(' + ')} are both high-impact/explosive and scheduled the same day.`
+      message: `${highImpact.map(a => a.name).join(' + ')} are ${highImpact.length === 2 ? 'both' : 'all'} high-impact/explosive and scheduled the same day.`
     }];
   }
   return [];
 }
 
-function checkAdjacentDayOverlap(state) {
+function checkAdjacentDayOverlap(view) {
   const warnings = [];
   for (let i = 0; i < DAY_ORDER.length; i++) {
     const dayA = DAY_ORDER[i];
     const dayB = DAY_ORDER[(i + 1) % DAY_ORDER.length]; // wraps sun -> mon
-    const musclesA = getDayMuscles(state, dayA).primary;
-    const musclesB = getDayMuscles(state, dayB).primary;
+    const musclesA = getDayMuscles(view, dayA).primary;
+    const musclesB = getDayMuscles(view, dayB).primary;
     const shared = [...musclesA].filter(m => musclesB.has(m));
     if (shared.length > 0) {
       warnings.push({
@@ -77,12 +78,12 @@ function checkAdjacentDayOverlap(state) {
   return warnings;
 }
 
-function getAllWarnings(state) {
-  const weeklyCoverage = getWeeklyCoverage(state);
+function getAllWarnings(view) {
+  const weeklyCoverage = getWeeklyCoverage(view);
   return [
-    ...DAY_ORDER.flatMap(d => checkDayRedundancy(state, d)),
+    ...DAY_ORDER.flatMap(d => checkDayRedundancy(view, d)),
     ...checkWeeklyGaps(weeklyCoverage),
-    ...DAY_ORDER.flatMap(d => checkHighImpactClash(state, d)),
-    ...checkAdjacentDayOverlap(state)
+    ...DAY_ORDER.flatMap(d => checkHighImpactClash(view, d)),
+    ...checkAdjacentDayOverlap(view)
   ];
 }

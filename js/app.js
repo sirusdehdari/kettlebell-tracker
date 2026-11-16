@@ -1,28 +1,306 @@
+// The key name predates the programs split; the shape of the data inside is
+// versioned by meta.schemaVersion and upgraded by migrateState().
 const STORAGE_KEY = 'kbapp_state_v1';
+// Per-device view preference (which tab was open last) — not program data,
+// so it lives outside the backed-up state.
+const UI_KEY = 'kbapp_ui_v1';
+const SCHEMA_VERSION = 2;
+const PRE_MIGRATION_BACKUP_KEY = `kbapp_backup_before_v${SCHEMA_VERSION}`;
+
+function clone(value) { return JSON.parse(JSON.stringify(value)); }
+
+// Declared before the first loadState() call below: loadState() runs during
+// boot and may set them (a `let` further down would still be in its TDZ).
+let unsavedChanges = false;      // memory holds edits that never reached storage
+let saveFailureReported = false;
+let storageLocked = false;       // stored data couldn't be read or set aside: never overwrite it
+let loadNotice = null;           // shown once, after the render that follows loadState()
+const LOCKED_NOTICE = 'Your saved data could not be read, and there was no room to set it aside. To protect it, the app won\'t save anything until this is fixed.';
+
+// The service worker serves files one by one (network first, its cache when
+// that fails), so a bad connection during an update can leave a script from
+// the previous release — or none — next to this app.js, which would then stop
+// on a blank page. Check for what this release needs from each script; if
+// anything is missing, touch no data, say so, and reload when reopened.
+if ([typeof DAY_ORDER, typeof MOVEMENTS, typeof ACTIVITIES, typeof EXERCISES, typeof PROGRAM_2_COMPLEXES,
+  typeof PROGRAM_2_ACTIVITY_CHANGES, typeof PROGRAM_2_DAY_NOTES, typeof getWeeklyCoverage, typeof getAllWarnings,
+  typeof renderBodyMapSVG].includes('undefined')) {
+  document.addEventListener('DOMContentLoaded', () => {
+    const view = document.getElementById('view');
+    if (view) view.innerHTML = '<div class="save-warning">Part of the update didn\'t load. Close the app and open it again with a connection — your data is untouched.</div>';
+  });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') location.reload(); });
+  throw new Error('Scripts from different releases on the page — app not started, no data touched.');
+}
 
 let state = loadState();
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed.schedule && parsed.movements && parsed.exercises) return parsed;
+// ---------- STATE: LOAD / MIGRATE / SAVE ----------
+
+function seedLibraries() {
+  return { movements: MOVEMENTS, exercises: EXERCISES, activities: ACTIVITIES };
+}
+
+function allSeedIds() {
+  return Object.entries(seedLibraries()).flatMap(([group, lib]) => Object.keys(lib).map(id => `${group}:${id}`));
+}
+
+// Program 2 = a copy of the given Program 1 week with the four kettlebell
+// complexes swapped for the new ones. Rehab, plyometrics, calisthenics,
+// sports, extras and day notes are copied as they are (plus Program 2's own
+// extras and day-note additions), and each new complex uses the same bell
+// weight as Program 1's complex that day (the user adjusts those, e.g.
+// Monday went 20 -> 16 kg after an injury).
+function buildProgram2Schedule(baseSchedule) {
+  const schedule = clone(baseSchedule || {});
+  DAY_ORDER.forEach(d => {
+    const day = schedule[d] || (schedule[d] = { complex: null, activities: [], notes: '' });
+    if (!Array.isArray(day.activities)) day.activities = [];
+    day.memos = {};
+  });
+  Object.entries(PROGRAM_2_COMPLEXES).forEach(([d, complex]) => {
+    const programOneWeight = schedule[d].complex && Number(schedule[d].complex.targetWeightKg);
+    schedule[d].complex = clone(complex);
+    if (programOneWeight > 0) schedule[d].complex.targetWeightKg = programOneWeight;
+  });
+  PROGRAM_2_ACTIVITY_CHANGES.forEach(({ dayKey, activityId, replaceActivityId, timing }) => {
+    const day = schedule[dayKey];
+    if (!day) return;
+    const idx = replaceActivityId ? day.activities.findIndex(a => a.activityId === replaceActivityId) : -1;
+    if (idx > -1) {
+      // If the replacement is already on the day, just drop the replaced one
+      // rather than listing the same activity twice.
+      const alreadyThere = day.activities.some((a, i) => i !== idx && a.activityId === activityId);
+      if (alreadyThere) day.activities.splice(idx, 1);
+      else day.activities.splice(idx, 1, { activityId, timing: day.activities[idx].timing, order: idx });
+    } else if (!day.activities.some(a => a.activityId === activityId)) {
+      day.activities.push({ activityId, timing: timing || 'after', order: 0 });
     }
-  } catch (e) { /* fall through to defaults */ }
-  return {
-    meta: { schemaVersion: 1 },
-    movements: JSON.parse(JSON.stringify(MOVEMENTS)),
-    exercises: JSON.parse(JSON.stringify(EXERCISES)),
-    activities: JSON.parse(JSON.stringify(ACTIVITIES)),
-    schedule: JSON.parse(JSON.stringify(WEEKLY_SCHEDULE)),
-    pendingChanges: JSON.parse(JSON.stringify(PENDING_CHANGES_SEED)),
-    history: []
+    day.activities.forEach((a, i) => { a.order = i; });
+  });
+  Object.entries(PROGRAM_2_DAY_NOTES).forEach(([dayKey, note]) => {
+    const day = schedule[dayKey];
+    if (day) day.notes = [typeof day.notes === 'string' ? day.notes : '', note].filter(Boolean).join(' ');
+  });
+  return schedule;
+}
+
+// A program can only reference an exercise/activity the library lacks if
+// the user didn't delete it (deleting an exercise in the app strips it from
+// every program; movements and activities can't be deleted in the app) —
+// e.g. a seed item an older install never received. Restore those from the
+// seeds. Must never throw: a throw would make loadState treat the data as
+// unreadable.
+function repairProgramReferences(s) {
+  const lib = seedLibraries();
+  const restore = (group, id) => { if (id && !s[group][id] && lib[group][id]) s[group][id] = clone(lib[group][id]); };
+  s.programs.forEach(p => DAY_ORDER.forEach(d => {
+    const day = p.schedule[d];
+    if (day.complex && Array.isArray(day.complex.exerciseIds)) day.complex.exerciseIds.forEach(id => restore('exercises', id));
+    day.activities.forEach(a => restore('activities', a && a.activityId));
+  }));
+  Object.values(s.exercises).forEach(ex => {
+    if (ex && Array.isArray(ex.movementIds)) ex.movementIds.forEach(m => restore('movements', m));
+  });
+}
+
+function normalizeDays(s) {
+  s.programs.forEach(p => {
+    p.schedule = p.schedule || {};
+    DAY_ORDER.forEach(d => {
+      const day = p.schedule[d] || (p.schedule[d] = { complex: null, activities: [], notes: '' });
+      if (!Array.isArray(day.activities)) day.activities = [];
+      if (typeof day.notes !== 'string') day.notes = '';
+      if (!day.memos || typeof day.memos !== 'object') day.memos = {};
+    });
+  });
+}
+
+// Adds seed items this install has never been offered (things shipped in an
+// update after it was set up). Installs from before this bookkeeping existed
+// are assumed to have received every first-release item, so a first-release
+// item that's missing now was deleted on purpose and must not come back;
+// only items tagged seedVersion >= 2 are added to them.
+function mergeSeedLibrary(s) {
+  const offered = Array.isArray(s.meta.seededIds) ? new Set(s.meta.seededIds) : null;
+  Object.entries(seedLibraries()).forEach(([group, lib]) => {
+    s[group] = s[group] || {};
+    Object.values(lib).forEach(item => {
+      const neverOffered = offered ? !offered.has(`${group}:${item.id}`) : (item.seedVersion || 1) >= 2;
+      if (neverOffered && !s[group][item.id]) s[group][item.id] = clone(item);
+    });
+  });
+  // Activities can't be edited in the app, so the seed's field config is
+  // authoritative — this is how older installs pick up e.g. the reps field.
+  Object.values(ACTIVITIES).forEach(a => {
+    if (s.activities[a.id]) s.activities[a.id].logFields = clone(a.logFields);
+  });
+  s.meta.seededIds = allSeedIds();
+}
+
+// The previous release (after a rollback, or a stale cached copy) edits only
+// `schedule` and saves `programs` back untouched, while this release always
+// stores the two identical — so a `schedule` that differs from Program 1
+// holds edits made there. Adopt them before anything below normalizes or
+// repairs Program 1 (otherwise e.g. an exercise deleted there would be
+// restored from the seeds).
+function adoptLegacyScheduleEdits(s) {
+  const program1 = s.programs.find(p => p.id === 'program-1') || s.programs[0];
+  if (s.schedule && typeof s.schedule === 'object' && JSON.stringify(s.schedule) !== JSON.stringify(program1.schedule)) {
+    program1.schedule = s.schedule;
+  }
+}
+
+// Brings saved data (current or older shape, including imported backups) up
+// to the current shape without losing anything the user entered. Returns
+// null when the data isn't from this app at all.
+function migrateState(s) {
+  if (!s || typeof s !== 'object' || !s.movements || !s.exercises) return null;
+  if (!Array.isArray(s.programs)) {
+    if (!s.schedule) return null;
+    // v1 had a single weekly schedule: it becomes Program 1, untouched.
+    s.programs = [{ id: 'program-1', name: 'Program 1', schedule: s.schedule }];
+  }
+  if (s.programs.length === 0) return null;
+  adoptLegacyScheduleEdits(s);
+  s.meta = s.meta || {};
+  s.pendingChanges = s.pendingChanges || [];
+  mergeSeedLibrary(s);
+  if (!s.programs.some(p => p.id === 'program-2')) {
+    // Built from this install's own Program 1, so the non-kettlebell days and
+    // extras are exactly what the user currently runs.
+    const base = s.programs.find(p => p.id === 'program-1') || s.programs[0];
+    s.programs.push({ id: 'program-2', name: 'Program 2', schedule: buildProgram2Schedule(base.schedule) });
+  }
+  normalizeDays(s);
+  repairProgramReferences(s);
+  keepLegacyKeys(s);
+  s.meta.schemaVersion = SCHEMA_VERSION;
+  return s;
+}
+
+// The pre-programs app only loads data that has `schedule` (and saves unknown
+// keys like `programs` back untouched). Keeping `schedule` pointed at Program
+// 1 means an older copy of the app — e.g. a stale cached app.js served
+// offline — still reads the data instead of starting over and overwriting it.
+// This release always stores the two identical (same object in memory).
+function keepLegacyKeys(s) {
+  s.schedule = (s.programs.find(p => p.id === 'program-1') || s.programs[0]).schedule;
+  if (!Array.isArray(s.history)) s.history = [];
+}
+
+function freshState() {
+  const program1 = clone(WEEKLY_SCHEDULE);
+  const s = {
+    meta: { schemaVersion: SCHEMA_VERSION, seededIds: allSeedIds() },
+    movements: clone(MOVEMENTS),
+    exercises: clone(EXERCISES),
+    activities: clone(ACTIVITIES),
+    programs: [
+      { id: 'program-1', name: 'Program 1', schedule: program1 },
+      { id: 'program-2', name: 'Program 2', schedule: buildProgram2Schedule(program1) }
+    ],
+    pendingChanges: clone(PENDING_CHANGES_SEED)
   };
+  normalizeDays(s);
+  keepLegacyKeys(s);
+  return s;
+}
+
+function loadState() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { /* storage unavailable */ }
+  if (!raw) return freshState();
+  try {
+    const parsed = JSON.parse(raw);
+    const fromVersion = (parsed && parsed.meta && parsed.meta.schemaVersion) || 1;
+    const migrated = migrateState(parsed);
+    if (migrated) {
+      if (fromVersion < SCHEMA_VERSION) {
+        // Keep the pre-upgrade data around once, then persist the upgrade so it
+        // only ever runs once.
+        try {
+          if (!localStorage.getItem(PRE_MIGRATION_BACKUP_KEY)) localStorage.setItem(PRE_MIGRATION_BACKUP_KEY, raw);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+        } catch (e) { unsavedChanges = true; /* runs from memory; written on the next successful save */ }
+      }
+      return migrated;
+    }
+  } catch (e) { /* unreadable — handled below */ }
+  // Data we can't read is set aside once, and the stored copy is only
+  // replaced after that aside-copy is safely written. If it can't be set
+  // aside, nothing may ever overwrite it this session.
+  const fresh = freshState();
+  try {
+    localStorage.setItem(`kbapp_unreadable_${Date.now()}`, raw);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+    loadNotice = 'Your saved data could not be read. It has been set aside on this phone (not deleted) and the app started fresh.';
+  } catch (e) {
+    storageLocked = true;
+    unsavedChanges = true;
+    loadNotice = LOCKED_NOTICE;
+  }
+  return fresh;
+}
+
+// Tells the user, once, what loadState() found. In locked mode this notice
+// is also saveState()'s "not saved" alert, so that isn't repeated.
+function showLoadNotice() {
+  if (!loadNotice) return;
+  const message = loadNotice;
+  loadNotice = null;
+  if (storageLocked) saveFailureReported = true;
+  alert(message);
 }
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (storageLocked) {
+    unsavedChanges = true;
+    if (!saveFailureReported) { saveFailureReported = true; alert(LOCKED_NOTICE); }
+    return;
+  }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    unsavedChanges = false;
+    saveFailureReported = false;
+  } catch (e) {
+    unsavedChanges = true;
+    if (!saveFailureReported) {
+      saveFailureReported = true;
+      alert('Could not save — the app\'s storage on this phone is full or unavailable. Your changes are kept while the app stays open.');
+    }
+  }
+}
+
+function loadUiPrefs() {
+  try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch (e) { return {}; }
+}
+
+function saveUiPrefs() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({ view: currentView === 'day' ? 'program' : currentView, programId: currentProgramId }));
+  } catch (e) { /* per-device convenience only */ }
+}
+
+// ---------- PROGRAM HELPERS ----------
+
+function getProgram(id) { return state.programs.find(p => p.id === id); }
+
+function currentProgram() { return getProgram(currentProgramId) || state.programs[0]; }
+
+// What coverage.js / warnings.js work on: the shared libraries plus one
+// program's week.
+function programView(program) {
+  return { movements: state.movements, exercises: state.exercises, activities: state.activities, schedule: program.schedule };
+}
+
+// Drops saved kg/reps notes for things no longer on the day.
+function pruneMemos(day) {
+  const keep = new Set([
+    ...(day.complex ? day.complex.exerciseIds.map(id => `ex:${id}`) : []),
+    ...day.activities.map(a => `act:${a.activityId}`)
+  ]);
+  Object.keys(day.memos || {}).forEach(k => { if (!keep.has(k)) delete day.memos[k]; });
 }
 
 // ---------- DATE / DAY HELPERS ----------
@@ -35,28 +313,7 @@ function todayDayKey() { return jsDayToKey(new Date().getDay()); }
 
 function uid(prefix) { return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`; }
 
-// ---------- HISTORY LOOKUP HELPERS ----------
-
-function getLastWeightForExercise(exerciseId, fallback) {
-  const sorted = [...state.history].sort((a, b) => b.date.localeCompare(a.date));
-  for (const h of sorted) {
-    if (!h.complexSnapshot) continue;
-    const match = h.complexSnapshot.exercises.find(e => e.exerciseId === exerciseId);
-    if (match) return match.weightKg;
-  }
-  return fallback;
-}
-
-function getLastActivityFields(activityId) {
-  const sorted = [...state.history].sort((a, b) => b.date.localeCompare(a.date));
-  for (const h of sorted) {
-    const match = h.activitiesSnapshot.find(a => a.activityId === activityId);
-    if (match) return match.fields;
-  }
-  return {};
-}
-
-// ---------- MUSCLE SUMMARY MARKUP ----------
+// ---------- SHARED MARKUP ----------
 
 function renderMuscleSummary(primarySet, secondarySet) {
   const p = [...primarySet], s = [...secondarySet];
@@ -70,6 +327,54 @@ function renderMuscleSummary(primarySet, secondarySet) {
 function exerciseSubLabel(exercise) {
   if (exercise.movementIds.length === 0) return 'Custom exercise — no muscle data';
   return exercise.movementIds.map(id => (state.movements[id] || {}).name || '?').join(' → ');
+}
+
+// No bell involved (e.g. a floor pushup): gets a reps box only, like the
+// bodyweight extras. A custom exercise without movements keeps its kg box.
+function isBodyweightOnly(exercise) {
+  return exercise.movementIds.length > 0 && exercise.movementIds.every(id => (state.movements[id] || {}).equipment === 'bodyweight');
+}
+
+// Optional how-to text on an exercise or activity, collapsed by default so
+// the day page stays short once the movements are familiar.
+function howToHtml(notes) {
+  return notes ? `<details class="how-to"><summary>How to</summary><p>${notes}</p></details>` : '';
+}
+
+// Optional kg / reps the user can jot down per exercise or extra. Only the
+// latest values are kept (saved per program and day) — there is no history.
+// type="text" + inputmode instead of type="number": iOS shows a comma on the
+// decimal keypad in Swedish, which type="number" silently rejects.
+// Saved kg is shown with a decimal comma, matching what the Swedish keypad
+// types (updateMemo accepts both separators).
+function kgText(value) {
+  return value === undefined || value === null || value === '' ? '' : String(value).replace('.', ',');
+}
+
+function memoInputsHtml(memoKey, memo, { weight, reps, weightPlaceholder }) {
+  const values = memo || {};
+  const fields = [];
+  if (weight) fields.push(`<label class="memo-field"><input type="text" inputmode="decimal" autocomplete="off" data-memo-key="${memoKey}" data-memo-field="weightKg" value="${kgText(values.weightKg)}" placeholder="${kgText(weightPlaceholder)}" aria-label="kg"><span>kg</span></label>`);
+  if (reps) fields.push(`<label class="memo-field"><input type="text" inputmode="numeric" autocomplete="off" data-memo-key="${memoKey}" data-memo-field="reps" value="${values.reps ?? ''}" placeholder="–" aria-label="reps"><span>reps</span></label>`);
+  return fields.length ? `<div class="memo-inputs">${fields.join('')}</div>` : '';
+}
+
+function updateMemo(program, dayKey, input) {
+  const day = program.schedule[dayKey];
+  if (!day) return;
+  const key = input.dataset.memoKey, field = input.dataset.memoField;
+  const raw = input.value.trim().replace(',', '.');
+  const entry = { ...(day.memos[key] || {}) };
+  if (raw === '') {
+    delete entry[field];
+  } else {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) return; // half-typed input — wait until it parses
+    entry[field] = n;
+  }
+  if (Object.keys(entry).length) day.memos[key] = entry;
+  else delete day.memos[key];
+  saveState();
 }
 
 // ---------- GENERIC ORDERED PICKER (search-to-add + up/down arrows) ----------
@@ -191,105 +496,27 @@ function wireOrderedPicker(config) {
   return { getList: () => current.map(x => ({ ...x })) };
 }
 
-// ---------- ACTIVITY FIELD EDITOR (search-to-add + editable log fields) ----------
-// Used both for adding a one-off activity while logging (without touching the
-// day's permanent schedule) and for editing an already-logged session's
-// activities (values, or adding one that was forgotten at the time).
-
-function activityFieldInputsHtml(act, cfg, values, idx) {
-  const inputs = [];
-  if (cfg.weight) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-af="${idx}:weight" value="${values.weightKg ?? ''}" step="1"></label>`);
-  if (cfg.reps) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">reps<input type="number" class="field" data-af="${idx}:reps" value="${values.reps ?? ''}" step="1"></label>`);
-  if (cfg.duration) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-af="${idx}:duration" value="${values.durationMin ?? ''}" step="1"></label>`);
-  if (cfg.distance) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-af="${idx}:distance" value="${values.distanceKm ?? ''}" step="0.1"></label>`);
-  if (cfg.pace) inputs.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-af="${idx}:pace" value="${values.pace ?? ''}" placeholder="5:30/km"></label>`);
-  return inputs.join('');
-}
-
-function activityLogFieldsConfig(a) {
-  // Prefer the activity's current library config; fall back to whatever
-  // fields are already present on an older snapshot if the activity was
-  // since edited or removed from the library.
-  const libCfg = state.activities[a.activityId]?.logFields;
-  if (libCfg) return libCfg;
-  return {
-    weight: 'weightKg' in a.fields, reps: 'reps' in a.fields,
-    duration: 'durationMin' in a.fields, distance: 'distanceKm' in a.fields, pace: 'pace' in a.fields
-  };
-}
-
-function wireActivityFieldEditor(containerEl, initialEntries, searchEl, resultsEl) {
-  let entries = initialEntries.map(e => ({ ...e, fields: { ...e.fields } }));
-
-  function renderRows() {
-    containerEl.innerHTML = entries.map((a, idx) => {
-      const cfg = activityLogFieldsConfig(a);
-      return `<div class="activity-row" style="align-items:flex-start">
-        <div class="act-main">
-          <div class="act-name">${a.name}</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${activityFieldInputsHtml(state.activities[a.activityId], cfg, a.fields, idx)}</div>
-        </div>
-        <button type="button" class="remove-btn" data-remove-af="${idx}">✕</button>
-      </div>`;
-    }).join('') || '<p class="empty-state" style="padding:10px">Nothing added yet.</p>';
-
-    containerEl.querySelectorAll('[data-remove-af]').forEach(btn => btn.addEventListener('click', () => {
-      entries.splice(Number(btn.dataset.removeAf), 1);
-      renderRows();
-      if (searchEl) renderResults(searchEl.value);
-    }));
-  }
-
-  function renderResults(query) {
-    if (!resultsEl) return;
-    const pickedIds = new Set(entries.map(e => e.activityId));
-    const q = (query || '').trim().toLowerCase();
-    const matches = Object.values(state.activities)
-      .filter(a => !pickedIds.has(a.id))
-      .filter(a => !q || a.name.toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .slice(0, 20);
-    resultsEl.innerHTML = matches.map(a => `
-      <button type="button" class="picker-search-result" data-id="${a.id}">${a.name}<div class="result-sub">${CATEGORY_LABELS[a.category]}</div></button>
-    `).join('') || '<p class="empty-state" style="padding:10px">No matches.</p>';
-    resultsEl.querySelectorAll('.picker-search-result').forEach(btn => btn.addEventListener('click', () => {
-      const act = state.activities[btn.dataset.id];
-      entries.push({ activityId: act.id, name: act.name, category: act.category, timing: 'standalone', fields: {} });
-      if (searchEl) searchEl.value = '';
-      renderRows(); renderResults('');
-    }));
-  }
-
-  if (searchEl) searchEl.addEventListener('input', () => renderResults(searchEl.value));
-  renderRows();
-  if (resultsEl) renderResults('');
-
-  return {
-    readValues: () => entries.map((a, idx) => {
-      const cfg = activityLogFieldsConfig(a);
-      const fields = {};
-      const get = (k) => document.querySelector(`[data-af="${idx}:${k}"]`);
-      if (cfg.weight) fields.weightKg = Number(get('weight')?.value) || undefined;
-      if (cfg.reps) fields.reps = Number(get('reps')?.value) || undefined;
-      if (cfg.duration) fields.durationMin = Number(get('duration')?.value) || undefined;
-      if (cfg.distance) fields.distanceKm = Number(get('distance')?.value) || undefined;
-      if (cfg.pace) fields.pace = get('pace')?.value || undefined;
-      return { activityId: a.activityId, name: a.name, category: a.category, timing: a.timing, fields };
-    })
-  };
-}
-
 // ---------- NAVIGATION ----------
+// currentView: 'program' (a program's week) | 'day' | 'muscles' | 'more'
 
-const VIEWS = ['week', 'muscles', 'history', 'more'];
-let currentView = 'week';
+let currentView = 'program';
+let currentProgramId = 'program-1';
 let selectedDayKey = null;
 let muscleViewState = { selectedDay: 'week', side: 'front' };
-let historyViewState = { exerciseId: null, rangeDays: 30 };
+
+function goToProgram(programId) {
+  currentProgramId = programId;
+  currentView = 'program';
+  selectedDayKey = null;
+  saveUiPrefs();
+  render();
+  window.scrollTo(0, 0);
+}
 
 function goTo(view) {
   currentView = view;
   selectedDayKey = null;
+  saveUiPrefs();
   render();
   window.scrollTo(0, 0);
 }
@@ -301,17 +528,42 @@ function goToDay(dayKey) {
   window.scrollTo(0, 0);
 }
 
+function programTabIcon(index) { return index < 9 ? `${index + 1}️⃣` : '📅'; }
+
+// An index.html cached before the programs split has the tab bar without its
+// id; finding it by class too lets this script run under that old page.
+function tabbarElement() {
+  return document.getElementById('tabbar') || document.querySelector('.tabbar');
+}
+
+function renderTabbar() {
+  const bar = tabbarElement();
+  if (!bar) return;
+  const onProgram = currentView === 'program' || currentView === 'day';
+  bar.innerHTML = [
+    ...state.programs.map((p, i) => `<button type="button" data-tab="program" data-program-id="${p.id}" class="${onProgram && p.id === currentProgramId ? 'active' : ''}"><span class="icon">${programTabIcon(i)}</span>${p.name}</button>`),
+    `<button type="button" data-tab="muscles" class="${currentView === 'muscles' ? 'active' : ''}"><span class="icon">💪</span>Muscles</button>`,
+    `<button type="button" data-tab="more" class="${currentView === 'more' ? 'active' : ''}"><span class="icon">⚙️</span>More</button>`
+  ].join('');
+}
+
 function render() {
-  document.querySelectorAll('.tabbar button').forEach(b => {
-    b.classList.toggle('active', b.dataset.view === currentView || (currentView === 'day' && b.dataset.view === 'week'));
-  });
-  const el = document.getElementById('view');
-  if (currentView === 'week') el.innerHTML = renderWeek();
-  else if (currentView === 'day') el.innerHTML = renderDayDetail(selectedDayKey);
-  else if (currentView === 'muscles') el.innerHTML = renderMuscles();
-  else if (currentView === 'history') el.innerHTML = renderHistory();
-  else if (currentView === 'more') el.innerHTML = renderMore();
+  if (!getProgram(currentProgramId)) currentProgramId = state.programs[0].id;
+  if (currentView === 'day' && !selectedDayKey) currentView = 'program';
+  renderTabbar();
+  let html = '';
+  if (currentView === 'program') html = renderProgram();
+  else if (currentView === 'day') html = renderDayDetail(selectedDayKey);
+  else if (currentView === 'muscles') html = renderMuscles();
+  else if (currentView === 'more') html = renderMore();
+  document.getElementById('view').innerHTML = renderSaveWarning() + html;
   attachViewHandlers();
+}
+
+function renderSaveWarning() {
+  if (storageLocked) return '<div class="save-warning">⚠️ Saving is paused to protect saved data the app couldn\'t read. Changes are kept only while the app stays open.</div>';
+  if (unsavedChanges) return '<div class="save-warning">⚠️ Not saved — the app\'s storage is full or unavailable. Changes are kept while the app stays open, and saving is retried when you come back to it.</div>';
+  return '';
 }
 
 // ---------- WARNINGS BADGE (compact, click to see the list in a popup) ----------
@@ -331,34 +583,43 @@ function openWarningsModal(warnings) {
   document.getElementById('modal-close').classList.add('danger');
 }
 
-// ---------- WEEK VIEW ----------
+// ---------- PROGRAM (WEEK) VIEW ----------
 
 function dayTypeLabel(day) {
   const bits = [];
   if (day.complex) bits.push(`Kettlebell (${day.complex.targetWeightKg}kg)${day.complex.positionOverride ? ` · ${POSITION_LABELS[day.complex.positionOverride]}` : ''}`);
   const cats = new Set(day.activities.map(a => (state.activities[a.activityId] || {}).category).filter(Boolean));
-  if (cats.has('cardio-sport')) bits.push([...cats].filter(c => c === 'cardio-sport').length ? 'Cardio/sport' : '');
+  if (cats.has('cardio-sport')) bits.push('Cardio/sport');
   if (cats.has('plyometric')) bits.push('Plyometrics');
   if (cats.has('calisthenics')) bits.push('Calisthenics');
-  if (!day.complex && cats.has('strength-extra')) bits.push('Rehab/stretch');
-  return bits.filter(Boolean).join(' + ') || 'Rest';
+  if (!day.complex) {
+    // Strength extras on a day without a complex: the seeded rehab and
+    // stretch items (ids rehab-*/stretch-*; the app can't create new
+    // activities) read as recovery, anything else (e.g. Nordic curls) as extras.
+    const extras = day.activities.map(a => state.activities[a.activityId]).filter(a => a && a.category === 'strength-extra');
+    const isRecovery = a => /^(rehab|stretch)-/.test(a.id);
+    if (extras.some(isRecovery)) bits.push('Rehab/stretch');
+    if (extras.some(a => !isRecovery(a))) bits.push('Extras');
+  }
+  return bits.join(' + ') || 'Rest';
 }
 
-function renderWeek() {
-  const warnings = getAllWarnings(state);
-  const weekWarnings = warnings.filter(w => w.scope === 'week');
+function renderProgram() {
+  const program = currentProgram();
+  const weekWarnings = getAllWarnings(programView(program)).filter(w => w.scope === 'week');
+  const today = todayDayKey();
   return `
-    <h2>This week</h2>
-    <button class="chip active" id="log-today-btn" style="width:100%;padding:12px;margin-bottom:16px;font-size:0.9rem">📝 Log today's workout</button>
+    <h2>${program.name}</h2>
     ${renderWarningBadge(weekWarnings, 'week')}
     <div style="margin-top:14px">
       ${DAY_ORDER.map(dayKey => {
-        const day = state.schedule[dayKey];
+        const day = program.schedule[dayKey];
+        const isToday = dayKey === today;
         return `
-        <button class="day-row" data-day="${dayKey}">
+        <button class="day-row ${isToday ? 'is-today' : ''}" data-day="${dayKey}">
           <div class="day-abbr">${DAY_LABELS_SHORT[dayKey].toUpperCase()}</div>
           <div class="day-main">
-            <div class="day-name">${DAY_LABELS[dayKey]}</div>
+            <div class="day-name">${DAY_LABELS[dayKey]}${isToday ? '<span class="today-pill">Today</span>' : ''}</div>
             <div class="day-sub">${dayTypeLabel(day)}</div>
           </div>
           ${day.complex ? `<div class="day-weight">${day.complex.targetWeightKg}kg</div>` : ''}
@@ -371,21 +632,25 @@ function renderWeek() {
 // ---------- DAY DETAIL VIEW ----------
 
 function renderDayDetail(dayKey) {
-  const day = state.schedule[dayKey];
-  const warnings = getAllWarnings(state).filter(w => w.dayKey === dayKey);
-  const { primary, secondary } = getDayMuscles(state, dayKey);
+  const program = currentProgram();
+  const view = programView(program);
+  const day = program.schedule[dayKey];
+  const warnings = getAllWarnings(view).filter(w => w.dayKey === dayKey);
+  const { primary, secondary } = getDayMuscles(view, dayKey);
+  const memos = day.memos || {};
 
   const exerciseRows = day.complex ? day.complex.exerciseIds.map(exId => {
     const ex = state.exercises[exId];
     if (!ex) return '';
-    const lastWeight = getLastWeightForExercise(exId, day.complex.targetWeightKg);
     return `
-      <div class="exercise-row" data-exercise-remove="${exId}">
+      <div class="exercise-row">
         <div class="ex-main">
           <div class="ex-name">${ex.name}</div>
-          <div class="ex-sub">${exerciseSubLabel(ex)} · last: ${lastWeight}kg</div>
+          <div class="ex-sub">${exerciseSubLabel(ex)}</div>
+          ${howToHtml(ex.notes)}
+          ${memoInputsHtml(`ex:${exId}`, memos[`ex:${exId}`], { weight: !isBodyweightOnly(ex), reps: true, weightPlaceholder: day.complex.targetWeightKg })}
         </div>
-        <button type="button" class="remove-btn" data-remove-exercise="${exId}" title="Remove from complex">✕</button>
+        <button type="button" class="remove-btn" data-remove-exercise="${exId}" aria-label="Remove">✕</button>
       </div>`;
   }).join('') : '';
 
@@ -393,31 +658,37 @@ function renderDayDetail(dayKey) {
   day.activities.forEach(a => {
     const act = state.activities[a.activityId];
     if (!act) return;
-    activityGroups[a.timing].push({ ...a, act });
+    (activityGroups[a.timing] || activityGroups.after).push({ ...a, act });
   });
   function renderActivityGroup(label, list) {
     if (list.length === 0) return '';
-    return `<div class="section-title">${label}</div>` + list.map(({ activityId, act }) => `
+    return `<div class="section-title">${label}</div>` + list.map(({ activityId, act }) => {
+      const lf = act.logFields || {};
+      return `
       <div class="activity-row">
         <div class="act-main">
           <div class="act-name">${act.name}</div>
           <div class="act-sub">${CATEGORY_LABELS[act.category]}${act.impactLevel === 'high' ? ' · high impact' : ''}</div>
+          ${howToHtml(act.notes)}
+          ${memoInputsHtml(`act:${activityId}`, memos[`act:${activityId}`], { weight: !!lf.weight, reps: !!lf.reps })}
         </div>
-        <button type="button" class="remove-btn" data-remove-activity="${activityId}" title="Remove">✕</button>
-      </div>`).join('');
+        <button type="button" class="remove-btn" data-remove-activity="${activityId}" aria-label="Remove">✕</button>
+      </div>`;
+    }).join('');
   }
 
   return `
-    <button class="link-btn" id="back-to-week">← Week</button>
+    <button class="link-btn" id="back-to-program">← ${program.name}</button>
     <h2>${DAY_LABELS[dayKey]}</h2>
-    ${day.complex ? `<p class="modal-sub">${day.complex.focusNote}</p>` : ''}
+    ${day.complex && day.complex.focusNote ? `<p class="modal-sub">${day.complex.focusNote}</p>` : ''}
     ${day.notes ? `<p class="modal-sub">${day.notes}</p>` : ''}
 
     ${renderWarningBadge(warnings, 'day')}
 
     ${day.complex ? `
     <div class="section-title" style="margin-top:20px">Kettlebell complex — ${day.complex.targetWeightKg}kg</div>
-    ${day.complex.positionOverride ? `<span class="pill status-future">🧎 Whole routine: ${POSITION_LABELS[day.complex.positionOverride]}</span>` : ''}
+    ${day.complex.positionOverride ? `<div class="routine-position"><span class="pill status-future">🧎 Whole routine: ${POSITION_LABELS[day.complex.positionOverride]}</span></div>` : ''}
+    <p class="memo-hint">Jot down kg and reps if you like — they're kept for next time.</p>
     ${exerciseRows}
     ` : '<div class="empty-state">No kettlebell complex scheduled this day.</div>'}
 
@@ -429,7 +700,6 @@ function renderDayDetail(dayKey) {
     ${renderMuscleSummary(primary, secondary)}
 
     <div class="action-row">
-      <button class="chip active" id="log-day-btn">📝 Log this day</button>
       <button class="chip" id="edit-complex-btn">Edit complex</button>
       <button class="chip" id="edit-activities-btn">Edit activities</button>
       <button class="chip" id="reset-day-btn" style="color:#922B21">Reset day</button>
@@ -439,10 +709,12 @@ function renderDayDetail(dayKey) {
 
 // ---------- COMPLEX EDITOR ----------
 
-function openComplexEditorModal(dayKey) {
-  const day = state.schedule[dayKey];
+function openComplexEditorModal(programId, dayKey) {
+  const program = getProgram(programId);
+  const day = program.schedule[dayKey];
   const html = `
     <p class="modal-title">Edit ${DAY_LABELS[dayKey]}'s complex</p>
+    <p class="modal-sub">${program.name}</p>
     <div class="modal-section">
       <p class="modal-section-title">Target weight (kg)</p>
       <input type="number" class="field" id="complex-weight" min="0" step="1" value="${day.complex ? day.complex.targetWeightKg : 16}">
@@ -502,16 +774,19 @@ function openComplexEditorModal(dayKey) {
       focusNote: document.getElementById('complex-focus').value.trim(),
       positionOverride: document.getElementById('complex-position-override').value || null
     };
+    pruneMemos(day);
     saveState(); closeModal(); render();
   });
 }
 
 // ---------- ACTIVITIES EDITOR ----------
 
-function openActivitiesEditorModal(dayKey) {
-  const day = state.schedule[dayKey];
+function openActivitiesEditorModal(programId, dayKey) {
+  const program = getProgram(programId);
+  const day = program.schedule[dayKey];
   const html = `
     <p class="modal-title">Edit ${DAY_LABELS[dayKey]}'s activities</p>
+    <p class="modal-sub">${program.name}</p>
     <div class="modal-section">
       <p class="modal-section-title">Filter by category</p>
       <div class="filter-bar" id="activity-cat-chips"></div>
@@ -552,241 +827,33 @@ function openActivitiesEditorModal(dayKey) {
   document.getElementById('activities-save-btn').addEventListener('click', () => {
     day.activities = picker.getList().map((x, idx) => ({ activityId: x.id, timing: x.extra, order: idx }));
     day.notes = document.getElementById('day-notes').value.trim();
-    saveState(); closeModal(); render();
-  });
-}
-
-// ---------- LOG TODAY / LOG DAY ----------
-
-const DEFAULT_ROUNDS_COMPLETED = 5;
-
-function openLogModal(dayKey) {
-  const day = state.schedule[dayKey];
-  const dateDefault = todayStr();
-
-  const exerciseFields = day.complex ? day.complex.exerciseIds.map(exId => {
-    const ex = state.exercises[exId];
-    const lastWeight = getLastWeightForExercise(exId, day.complex.targetWeightKg);
-    return `
-      <div class="exercise-row">
-        <div class="ex-main"><div class="ex-name">${ex.name}</div></div>
-        <div class="ex-weight"><input type="number" class="field" data-log-exercise="${exId}" value="${lastWeight}" step="1"> kg</div>
-      </div>`;
-  }).join('') : '';
-
-  const activityFields = day.activities.map(a => {
-    const act = state.activities[a.activityId];
-    if (!act) return '';
-    const last = getLastActivityFields(a.activityId);
-    const fields = [];
-    if (act.logFields.weight) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">kg<input type="number" class="field" data-log-activity-field="${a.activityId}:weight" value="${last.weightKg ?? ''}" step="1"></label>`);
-    if (act.logFields.reps) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">reps<input type="number" class="field" data-log-activity-field="${a.activityId}:reps" value="${last.reps ?? ''}" step="1"></label>`);
-    if (act.logFields.duration) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">min<input type="number" class="field" data-log-activity-field="${a.activityId}:duration" value="${last.durationMin ?? ''}" step="1"></label>`);
-    if (act.logFields.distance) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">km<input type="number" class="field" data-log-activity-field="${a.activityId}:distance" value="${last.distanceKm ?? ''}" step="0.1"></label>`);
-    if (act.logFields.pace) fields.push(`<label style="font-size:0.7rem;color:var(--muted)">pace<input type="text" class="field" data-log-activity-field="${a.activityId}:pace" value="${last.pace ?? ''}" placeholder="5:30/km"></label>`);
-    return `
-      <div class="activity-row" style="align-items:flex-start">
-        <div class="act-main">
-          <label style="display:flex;align-items:center;gap:6px">
-            <input type="checkbox" data-log-activity-include="${a.activityId}" checked style="width:auto">
-            <span class="act-name">${act.name}</span>
-          </label>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">${fields.join('')}</div>
-        </div>
-      </div>`;
-  }).join('');
-
-  const html = `
-    <p class="modal-title">Log ${DAY_LABELS[dayKey]}</p>
-    <div class="modal-section">
-      <p class="modal-section-title">Date</p>
-      <input type="date" class="field" id="log-date" value="${dateDefault}">
-    </div>
-    ${day.complex ? `
-    <div class="modal-section">
-      <p class="modal-section-title">Weight used per exercise</p>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-        <input type="number" class="field" id="log-weight-all" value="${day.complex.targetWeightKg}" step="1" style="flex:1">
-        <button type="button" class="chip" id="log-weight-all-btn">Apply to all</button>
-      </div>
-      ${exerciseFields}
-    </div>
-    <div class="modal-section">
-      <p class="modal-section-title">Rounds completed</p>
-      <input type="number" class="field" id="log-rounds" min="1" step="1" value="${DEFAULT_ROUNDS_COMPLETED}">
-    </div>` : ''}
-    ${day.activities.length ? `<div class="modal-section"><p class="modal-section-title">Activities</p>${activityFields}</div>` : ''}
-    <div class="modal-section">
-      <p class="modal-section-title">Add something extra for today</p>
-      <p class="picker-cap-note" style="margin:0 0 8px">One-off — this only affects today's log, it won't change ${DAY_LABELS[dayKey]}'s permanent schedule.</p>
-      <div class="picker-rows" id="log-adhoc-rows"></div>
-      <div class="picker-search">
-        <input type="text" class="field" id="log-adhoc-search" placeholder="Search activities…">
-        <div class="picker-search-results" id="log-adhoc-results"></div>
-      </div>
-    </div>
-    <div class="modal-section">
-      <p class="modal-section-title">Notes</p>
-      <textarea class="field" id="log-notes" placeholder="How did it feel?"></textarea>
-    </div>
-    <div class="modal-section">
-      <button class="chip active" style="width:100%;padding:10px" id="log-save-btn">Save session</button>
-    </div>
-  `;
-  openModal(html);
-
-  const weightAllBtn = document.getElementById('log-weight-all-btn');
-  if (weightAllBtn) weightAllBtn.addEventListener('click', () => {
-    const v = document.getElementById('log-weight-all').value;
-    if (v === '') return;
-    document.querySelectorAll('[data-log-exercise]').forEach(el => { el.value = v; });
-  });
-
-  const adhocEditor = wireActivityFieldEditor(
-    document.getElementById('log-adhoc-rows'), [],
-    document.getElementById('log-adhoc-search'), document.getElementById('log-adhoc-results')
-  );
-
-  document.getElementById('log-save-btn').addEventListener('click', () => {
-    const date = document.getElementById('log-date').value.trim() || dateDefault;
-    let complexSnapshot = null;
-    if (day.complex) {
-      complexSnapshot = {
-        exercises: day.complex.exerciseIds.map(exId => ({
-          exerciseId: exId, name: state.exercises[exId].name,
-          weightKg: Number(document.querySelector(`[data-log-exercise="${exId}"]`).value) || 0
-        })),
-        targetWeightKg: day.complex.targetWeightKg,
-        focusNote: day.complex.focusNote,
-        roundsCompleted: Number(document.getElementById('log-rounds').value) || DEFAULT_ROUNDS_COMPLETED
-      };
-    }
-    const scheduledSnapshot = day.activities
-      .filter(a => document.querySelector(`[data-log-activity-include="${a.activityId}"]`)?.checked)
-      .map(a => {
-        const act = state.activities[a.activityId];
-        const fields = {};
-        if (act.logFields.weight) fields.weightKg = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:weight"]`)?.value) || undefined;
-        if (act.logFields.reps) fields.reps = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:reps"]`)?.value) || undefined;
-        if (act.logFields.duration) fields.durationMin = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:duration"]`)?.value) || undefined;
-        if (act.logFields.distance) fields.distanceKm = Number(document.querySelector(`[data-log-activity-field="${a.activityId}:distance"]`)?.value) || undefined;
-        if (act.logFields.pace) fields.pace = document.querySelector(`[data-log-activity-field="${a.activityId}:pace"]`)?.value || undefined;
-        return { activityId: a.activityId, name: act.name, category: act.category, timing: a.timing, fields };
-      });
-    const activitiesSnapshot = scheduledSnapshot.concat(adhocEditor.readValues());
-
-    state.history.push({
-      id: uid('session'), date, dayOfWeek: dayKey,
-      complexSnapshot, activitiesSnapshot,
-      note: document.getElementById('log-notes').value.trim()
-    });
-    saveState(); closeModal(); render();
-  });
-}
-
-// ---------- EDIT / DELETE A LOGGED SESSION ----------
-
-function openEditHistoryModal(historyId) {
-  const h = state.history.find(x => x.id === historyId);
-  if (!h) return;
-
-  const exerciseFields = h.complexSnapshot ? h.complexSnapshot.exercises.map(e => `
-    <div class="exercise-row">
-      <div class="ex-main"><div class="ex-name">${e.name}</div></div>
-      <div class="ex-weight"><input type="number" class="field" data-edit-exercise="${e.exerciseId}" value="${e.weightKg}" step="1"> kg</div>
-    </div>`).join('') : '';
-
-  const html = `
-    <p class="modal-title">Edit session</p>
-    <p class="modal-sub">${DAY_LABELS[h.dayOfWeek]}</p>
-    <div class="modal-section">
-      <p class="modal-section-title">Date</p>
-      <input type="date" class="field" id="edit-log-date" value="${h.date}">
-    </div>
-    ${h.complexSnapshot ? `
-    <div class="modal-section">
-      <p class="modal-section-title">Weight used per exercise</p>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
-        <input type="number" class="field" id="edit-log-weight-all" placeholder="Set all to…" step="1" style="flex:1">
-        <button type="button" class="chip" id="edit-log-weight-all-btn">Apply to all</button>
-      </div>
-      ${exerciseFields}
-    </div>
-    <div class="modal-section">
-      <p class="modal-section-title">Rounds completed</p>
-      <input type="number" class="field" id="edit-log-rounds" min="1" step="1" value="${h.complexSnapshot.roundsCompleted ?? DEFAULT_ROUNDS_COMPLETED}">
-    </div>` : ''}
-    <div class="modal-section">
-      <p class="modal-section-title">Activities</p>
-      <div class="picker-rows" id="edit-log-activity-rows"></div>
-      <div class="picker-search">
-        <input type="text" class="field" id="edit-log-activity-search" placeholder="Add an activity…">
-        <div class="picker-search-results" id="edit-log-activity-results"></div>
-      </div>
-    </div>
-    <div class="modal-section">
-      <p class="modal-section-title">Notes</p>
-      <textarea class="field" id="edit-log-notes">${h.note || ''}</textarea>
-    </div>
-    <div class="modal-section">
-      <button class="chip active" style="width:100%;padding:10px" id="edit-log-save-btn">Save changes</button>
-    </div>
-    <div class="modal-section">
-      <button style="width:100%;padding:10px;background:none;border:none;color:#922B21;font-family:'Inter',sans-serif" id="edit-log-delete-btn">Delete session</button>
-    </div>
-  `;
-  openModal(html);
-
-  const weightAllBtn = document.getElementById('edit-log-weight-all-btn');
-  if (weightAllBtn) weightAllBtn.addEventListener('click', () => {
-    const v = document.getElementById('edit-log-weight-all').value;
-    if (v === '') return;
-    document.querySelectorAll('[data-edit-exercise]').forEach(el => { el.value = v; });
-  });
-
-  const activityEditor = wireActivityFieldEditor(
-    document.getElementById('edit-log-activity-rows'), h.activitiesSnapshot,
-    document.getElementById('edit-log-activity-search'), document.getElementById('edit-log-activity-results')
-  );
-
-  document.getElementById('edit-log-save-btn').addEventListener('click', () => {
-    h.date = document.getElementById('edit-log-date').value || h.date;
-    if (h.complexSnapshot) {
-      h.complexSnapshot.exercises.forEach(e => {
-        e.weightKg = Number(document.querySelector(`[data-edit-exercise="${e.exerciseId}"]`).value) || 0;
-      });
-      h.complexSnapshot.roundsCompleted = Number(document.getElementById('edit-log-rounds').value) || DEFAULT_ROUNDS_COMPLETED;
-    }
-    h.activitiesSnapshot = activityEditor.readValues();
-    h.note = document.getElementById('edit-log-notes').value.trim();
-    saveState(); closeModal(); render();
-  });
-
-  document.getElementById('edit-log-delete-btn').addEventListener('click', () => {
-    if (!confirm('Delete this logged session? This cannot be undone.')) return;
-    state.history = state.history.filter(x => x.id !== historyId);
+    pruneMemos(day);
     saveState(); closeModal(); render();
   });
 }
 
 // ---------- MUSCLES VIEW ----------
 
-function renderMuscles() {
-  const chips = ['week', ...DAY_ORDER];
-  const coverage = getWeeklyCoverage(state);
-  const weeklyWarnings = getAllWarnings(state).filter(w => w.scope === 'week');
+function musclesForSelection(view) {
+  return muscleViewState.selectedDay === 'week'
+    ? mergeMuscleSets(DAY_ORDER.map(d => getDayMuscles(view, d)))
+    : getDayMuscles(view, muscleViewState.selectedDay);
+}
 
-  let primary, secondary;
-  if (muscleViewState.selectedDay === 'week') {
-    ({ primary, secondary } = mergeMuscleSets(DAY_ORDER.map(d => getDayMuscles(state, d))));
-  } else {
-    ({ primary, secondary } = getDayMuscles(state, muscleViewState.selectedDay));
-  }
+function renderMuscles() {
+  const program = currentProgram();
+  const view = programView(program);
+  const coverage = getWeeklyCoverage(view);
+  const weeklyWarnings = getAllWarnings(view).filter(w => w.scope === 'week');
+  const { primary, secondary } = musclesForSelection(view);
 
   return `
     <h2>Muscles</h2>
+    <div class="segmented">
+      ${state.programs.map(p => `<button type="button" class="${p.id === program.id ? 'active' : ''}" data-muscle-program="${p.id}">${p.name}</button>`).join('')}
+    </div>
     <div class="filter-bar">
-      ${chips.map(c => `<button class="chip ${muscleViewState.selectedDay === c ? 'active' : ''}" data-muscle-day="${c}">${c === 'week' ? 'Whole week' : DAY_LABELS_SHORT[c]}</button>`).join('')}
+      ${['week', ...DAY_ORDER].map(c => `<button class="chip ${muscleViewState.selectedDay === c ? 'active' : ''}" data-muscle-day="${c}">${c === 'week' ? 'Whole week' : DAY_LABELS_SHORT[c]}</button>`).join('')}
     </div>
     <div class="bodymap-controls">
       <button class="chip ${muscleViewState.side === 'front' ? 'active' : ''}" data-muscle-side="front">Front</button>
@@ -800,7 +867,7 @@ function renderMuscles() {
     </div>
     ${renderMuscleSummary(primary, secondary)}
 
-    <div class="section-title">Weekly coverage</div>
+    <div class="section-title">Weekly coverage — ${program.name}</div>
     <div class="table-wrap">
       <table class="coverage-table">
         <thead><tr><th>Muscle</th>${DAY_ORDER.map(d => `<th>${DAY_LABELS_SHORT[d]}</th>`).join('')}</tr></thead>
@@ -823,71 +890,7 @@ function renderMuscles() {
   `;
 }
 
-// ---------- HISTORY VIEW ----------
-
-const RANGE_PRESETS = [[7, '7d'], [30, '30d'], [90, '90d'], [365, '1y'], [Infinity, 'All']];
-
-function renderRangeChips(activeRangeDays) {
-  return `<div class="range-chips">
-    ${RANGE_PRESETS.map(([val, label]) => `<button class="chip ${activeRangeDays === val ? 'active' : ''}" data-range="${val === Infinity ? 'inf' : val}">${label}</button>`).join('')}
-  </div>`;
-}
-
-function renderHistory() {
-  const exercisesWithHistory = getAllExerciseIdsWithHistory(state);
-  if (!historyViewState.exerciseId && exercisesWithHistory.length) historyViewState.exerciseId = exercisesWithHistory[0];
-  const wvl = getWeekVsLastWeek(state);
-  const visibleHistory = filterByRange(state.history, historyViewState.rangeDays).sort((a, b) => b.date.localeCompare(a.date));
-
-  const chartSection = historyViewState.exerciseId ? `
-    <div class="section-title">Weight trend — ${state.exercises[historyViewState.exerciseId]?.name || ''}</div>
-    <select class="field" id="history-exercise-select" style="margin-bottom:8px">
-      ${exercisesWithHistory.map(id => `<option value="${id}" ${id === historyViewState.exerciseId ? 'selected' : ''}>${state.exercises[id]?.name || id}</option>`).join('')}
-    </select>
-    ${renderLineChart(getExerciseWeightSeries(state, historyViewState.exerciseId), { rangeDays: historyViewState.rangeDays })}
-  ` : '<p class="empty-state">Log a session to start seeing trends.</p>';
-
-  const prSection = exercisesWithHistory.map(id => {
-    const pr = getPersonalRecord(getExerciseWeightSeries(state, id));
-    if (!pr) return '';
-    return `<div class="pr-card"><span>${state.exercises[id]?.name || id}</span><span>${pr.value}kg (${pr.date})</span></div>`;
-  }).join('');
-
-  return `
-    <h2>History</h2>
-    <div class="section-title" style="margin-top:0">Time period</div>
-    ${renderRangeChips(historyViewState.rangeDays)}
-
-    <div class="week-compare">
-      <div class="wc-box"><div class="wc-num">${wvl.thisWeekSessions}</div><div class="wc-label">This week (Mon–Sun)</div></div>
-      <div class="wc-box"><div class="wc-num">${wvl.lastWeekSessions}</div><div class="wc-label">Last week (Mon–Sun)</div></div>
-    </div>
-
-    <div class="section-title">Timeline <span style="font-weight:400;text-transform:none;letter-spacing:normal">— tap a session for details</span></div>
-    ${renderTimeline(visibleHistory)}
-    ${visibleHistory.length ? `<div class="timeline-legend">
-      <span><span class="tick-dot tick-kb" style="display:inline-block;vertical-align:middle;margin-right:5px"></span>Kettlebell session</span>
-      <span><span class="tick-dot tick-activity" style="display:inline-block;vertical-align:middle;margin-right:5px"></span>Activity only</span>
-    </div>` : ''}
-
-    ${chartSection}
-
-    ${prSection ? `<div class="section-title">Personal records</div>${prSection}` : ''}
-
-    <div class="section-title">Log (${historyViewState.rangeDays === Infinity ? 'all time' : RANGE_PRESETS.find(([v]) => v === historyViewState.rangeDays)[1]}) <span style="font-weight:400;text-transform:none;letter-spacing:normal">— tap to edit</span></div>
-    ${visibleHistory.length === 0 ? '<p class="empty-state">No sessions logged in this time period.</p>' :
-      visibleHistory.map(h => `
-        <button type="button" class="history-entry" data-history-id="${h.id}">
-          <div class="he-top"><span>${DAY_LABELS[h.dayOfWeek]}</span><span>${h.date}</span></div>
-          <div class="he-sub">${h.complexSnapshot ? `KB @ ${h.complexSnapshot.targetWeightKg}kg × ${h.complexSnapshot.roundsCompleted ?? DEFAULT_ROUNDS_COMPLETED} rounds — ${h.complexSnapshot.exercises.map(e => `${e.name} (${e.weightKg}kg)`).join(', ')}` : ''}</div>
-          ${h.activitiesSnapshot.length ? `<div class="he-sub">${h.activitiesSnapshot.map(a => a.name).join(', ')}</div>` : ''}
-          ${h.note ? `<div class="he-note">"${h.note}"</div>` : ''}
-        </button>
-      `).join('')}
-  `;
-}
-
-// ---------- MORE VIEW (pending changes, movements library, backup) ----------
+// ---------- MORE VIEW (pending changes, libraries, backup) ----------
 
 function renderMore() {
   return `
@@ -907,7 +910,7 @@ function renderMore() {
     <button class="chip" id="add-pending-btn" style="margin-top:8px">+ Add a pending change</button>
 
     <div class="section-title">Exercises library</div>
-    <p class="modal-sub">Movement chains used inside kettlebell complexes.</p>
+    <p class="modal-sub">Movement chains used inside kettlebell complexes. Shared by all programs.</p>
     <button class="chip" id="add-exercise-btn" style="margin-bottom:8px">+ Add exercise</button>
     ${Object.values(state.exercises).sort((a, b) => a.name.localeCompare(b.name)).map(ex => `
       <div class="exercise-row" data-edit-exercise="${ex.id}">
@@ -979,6 +982,10 @@ function openExerciseEditorModal(exerciseId) {
       <input type="text" class="field" id="ex-name" value="${existing ? existing.name : ''}">
     </div>
     <div class="modal-section">
+      <p class="modal-section-title">How to (optional)</p>
+      <textarea class="field" id="ex-notes" placeholder="Grip, reps, cues — shown under the exercise on the day page">${existing && existing.notes ? existing.notes : ''}</textarea>
+    </div>
+    <div class="modal-section">
       <p class="modal-section-title">Status</p>
       <div class="filter-bar">
         <button type="button" class="chip ${(!existing || existing.status === 'active') ? 'active' : ''}" data-ex-status="active">Active</button>
@@ -1032,20 +1039,27 @@ function openExerciseEditorModal(exerciseId) {
     const name = nameInput.value.trim() || suggestExerciseName(movementIds);
     const id = exerciseId || uid('exercise');
     state.exercises[id] = {
+      ...(existing || {}),
       id, name, movementIds, status,
       blockerNote: status === 'future' ? (document.getElementById('ex-blocker').value.trim() || null) : null,
-      replacesExerciseId: status === 'future' ? (document.getElementById('ex-replaces').value || null) : null
+      replacesExerciseId: status === 'future' ? (document.getElementById('ex-replaces').value || null) : null,
+      notes: document.getElementById('ex-notes').value.trim()
     };
+    if (!state.exercises[id].notes) delete state.exercises[id].notes;
     saveState(); closeModal(); render();
   });
 
   const deleteBtn = document.getElementById('ex-delete-btn');
   if (deleteBtn) deleteBtn.addEventListener('click', () => {
-    if (!confirm(`Delete "${existing.name}"? It will also be removed from any day's complex that uses it.`)) return;
-    DAY_ORDER.forEach(d => {
-      const day = state.schedule[d];
-      if (day.complex) day.complex.exerciseIds = day.complex.exerciseIds.filter(id => id !== exerciseId);
-    });
+    if (!confirm(`Delete "${existing.name}"? It will also be removed from every program's complexes that use it.`)) return;
+    state.programs.forEach(p => DAY_ORDER.forEach(d => {
+      const day = p.schedule[d];
+      if (day.complex) {
+        day.complex.exerciseIds = day.complex.exerciseIds.filter(id => id !== exerciseId);
+        if (day.complex.exerciseIds.length === 0) day.complex = null;
+      }
+      pruneMemos(day);
+    }));
     delete state.exercises[exerciseId];
     saveState(); closeModal(); render();
   });
@@ -1126,18 +1140,20 @@ async function exportData() {
   URL.revokeObjectURL(url);
 }
 
+// Old backups (one weekly schedule) are upgraded the same way stored data is.
 function importDataFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
-    try {
-      const parsed = JSON.parse(reader.result);
-      if (!parsed.schedule || !parsed.movements) throw new Error('Invalid format');
-      state = parsed;
-      saveState(); render();
-      alert('Data restored!');
-    } catch (e) {
-      alert('Could not read that file — is it a valid backup from this app?');
-    }
+    let migrated = null;
+    try { migrated = migrateState(JSON.parse(reader.result)); } catch (e) { migrated = null; }
+    if (!migrated) { alert('Could not read that file — is it a valid backup from this app?'); return; }
+    state = migrated;
+    saveState(); render();
+    alert(storageLocked
+      ? 'Backup loaded for this session only: saving is paused to protect the data the app couldn\'t read, so it will be gone when the app closes.'
+      : unsavedChanges
+        ? 'Backup loaded, but it couldn\'t be saved yet (storage full or unavailable). Saving is retried when you come back to the app.'
+        : 'Data restored!');
   };
   reader.readAsText(file);
 }
@@ -1157,82 +1173,81 @@ function closeModal() {
 function isModalOpen() { return document.getElementById('modal-overlay').classList.contains('open'); }
 
 function refreshFromExternalChange() {
+  // Edits that never reached storage must not be replaced by the older
+  // stored copy: retry the save, and keep memory if it still fails.
+  if (unsavedChanges) {
+    saveState();
+    if (unsavedChanges) { render(); return; }
+  }
   state = loadState();
   if (isModalOpen()) closeModal();
   render();
+  showLoadNotice();
 }
 
 // ---------- EVENT WIRING ----------
 
 function attachViewHandlers() {
-  // Warnings badge (Week + Day detail)
+  const program = currentProgram();
+
+  // Warnings badge (program week + day detail)
   document.querySelectorAll('[data-warnings-scope]').forEach(el => el.addEventListener('click', () => {
-    const scope = el.dataset.warningsScope;
-    const warnings = scope === 'week'
-      ? getAllWarnings(state).filter(w => w.scope === 'week')
-      : getAllWarnings(state).filter(w => w.dayKey === selectedDayKey);
-    openWarningsModal(warnings);
+    const all = getAllWarnings(programView(program));
+    openWarningsModal(el.dataset.warningsScope === 'week'
+      ? all.filter(w => w.scope === 'week')
+      : all.filter(w => w.dayKey === selectedDayKey));
   }));
 
-  // Week
+  // Program week
   document.querySelectorAll('.day-row[data-day]').forEach(el => el.addEventListener('click', () => goToDay(el.dataset.day)));
-  const logTodayBtn = document.getElementById('log-today-btn');
-  if (logTodayBtn) logTodayBtn.addEventListener('click', () => openLogModal(todayDayKey()));
 
   // Day detail
-  const backBtn = document.getElementById('back-to-week');
-  if (backBtn) backBtn.addEventListener('click', () => goTo('week'));
-  const logDayBtn = document.getElementById('log-day-btn');
-  if (logDayBtn) logDayBtn.addEventListener('click', () => openLogModal(selectedDayKey));
+  const backBtn = document.getElementById('back-to-program');
+  if (backBtn) backBtn.addEventListener('click', () => goToProgram(program.id));
   const editComplexBtn = document.getElementById('edit-complex-btn');
-  if (editComplexBtn) editComplexBtn.addEventListener('click', () => openComplexEditorModal(selectedDayKey));
+  if (editComplexBtn) editComplexBtn.addEventListener('click', () => openComplexEditorModal(program.id, selectedDayKey));
   const editActivitiesBtn = document.getElementById('edit-activities-btn');
-  if (editActivitiesBtn) editActivitiesBtn.addEventListener('click', () => openActivitiesEditorModal(selectedDayKey));
+  if (editActivitiesBtn) editActivitiesBtn.addEventListener('click', () => openActivitiesEditorModal(program.id, selectedDayKey));
   const resetDayBtn = document.getElementById('reset-day-btn');
   if (resetDayBtn) resetDayBtn.addEventListener('click', () => {
-    if (!confirm(`Reset ${DAY_LABELS[selectedDayKey]}? This clears the complex, activities, and notes for this day.`)) return;
-    state.schedule[selectedDayKey] = { complex: null, activities: [], notes: '' };
+    if (!confirm(`Reset ${DAY_LABELS[selectedDayKey]} in ${program.name}? This clears its complex, activities, notes and saved kg/reps.`)) return;
+    program.schedule[selectedDayKey] = { complex: null, activities: [], notes: '', memos: {} };
     saveState(); render();
   });
-  document.querySelectorAll('[data-remove-exercise]').forEach(el => el.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const day = state.schedule[selectedDayKey];
+  document.querySelectorAll('[data-remove-exercise]').forEach(el => el.addEventListener('click', () => {
+    const day = program.schedule[selectedDayKey];
+    const ex = state.exercises[el.dataset.removeExercise];
+    if (!confirm(`Remove "${ex ? ex.name : 'this exercise'}" from ${DAY_LABELS[selectedDayKey]} in ${program.name}?`)) return;
     day.complex.exerciseIds = day.complex.exerciseIds.filter(id => id !== el.dataset.removeExercise);
     if (day.complex.exerciseIds.length === 0) day.complex = null;
+    pruneMemos(day);
     saveState(); render();
   }));
-  document.querySelectorAll('[data-remove-activity]').forEach(el => el.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const day = state.schedule[selectedDayKey];
+  document.querySelectorAll('[data-remove-activity]').forEach(el => el.addEventListener('click', () => {
+    const day = program.schedule[selectedDayKey];
+    const act = state.activities[el.dataset.removeActivity];
+    if (!confirm(`Remove "${act ? act.name : 'this activity'}" from ${DAY_LABELS[selectedDayKey]} in ${program.name}?`)) return;
     const idx = day.activities.findIndex(a => a.activityId === el.dataset.removeActivity);
     if (idx > -1) day.activities.splice(idx, 1);
+    pruneMemos(day);
     saveState(); render();
   }));
+  document.querySelectorAll('[data-memo-key]').forEach(el => el.addEventListener('input', () => updateMemo(program, selectedDayKey, el)));
 
   // Muscles
+  document.querySelectorAll('[data-muscle-program]').forEach(el => el.addEventListener('click', () => {
+    currentProgramId = el.dataset.muscleProgram; saveUiPrefs(); render();
+  }));
   document.querySelectorAll('[data-muscle-day]').forEach(el => el.addEventListener('click', () => { muscleViewState.selectedDay = el.dataset.muscleDay; render(); }));
   document.querySelectorAll('[data-muscle-side]').forEach(el => el.addEventListener('click', () => { muscleViewState.side = el.dataset.muscleSide; render(); }));
   const bodymapSvg = document.getElementById('bodymap-svg');
   if (bodymapSvg) {
     setBodyMapView(bodymapSvg, muscleViewState.side);
-    let primary, secondary;
-    if (currentView === 'muscles') {
-      if (muscleViewState.selectedDay === 'week') ({ primary, secondary } = mergeMuscleSets(DAY_ORDER.map(d => getDayMuscles(state, d))));
-      else ({ primary, secondary } = getDayMuscles(state, muscleViewState.selectedDay));
-    } else if (currentView === 'day') {
-      ({ primary, secondary } = getDayMuscles(state, selectedDayKey));
-    }
-    if (primary) colorBodyMap(bodymapSvg, { primary, secondary });
+    const view = programView(program);
+    const muscles = currentView === 'muscles' ? musclesForSelection(view)
+      : currentView === 'day' ? getDayMuscles(view, selectedDayKey) : null;
+    if (muscles) colorBodyMap(bodymapSvg, muscles);
   }
-
-  // History
-  const historySelect = document.getElementById('history-exercise-select');
-  if (historySelect) historySelect.addEventListener('change', () => { historyViewState.exerciseId = historySelect.value; render(); });
-  document.querySelectorAll('[data-range]').forEach(el => el.addEventListener('click', () => {
-    historyViewState.rangeDays = el.dataset.range === 'inf' ? Infinity : Number(el.dataset.range);
-    render();
-  }));
-  document.querySelectorAll('[data-history-id]').forEach(el => el.addEventListener('click', () => openEditHistoryModal(el.dataset.historyId)));
 
   // More
   const addPendingBtn = document.getElementById('add-pending-btn');
@@ -1265,8 +1280,17 @@ function attachViewHandlers() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('.tabbar button').forEach(b => {
-    b.addEventListener('click', () => goTo(b.dataset.view));
+  const prefs = loadUiPrefs();
+  currentProgramId = prefs.programId && getProgram(prefs.programId) ? prefs.programId : state.programs[0].id;
+  if (['program', 'muscles', 'more'].includes(prefs.view)) currentView = prefs.view;
+
+  // The tab bar is re-rendered on every render(), so it's wired once here by delegation.
+  const tabbar = tabbarElement();
+  if (tabbar) tabbar.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-tab]');
+    if (!btn) return;
+    if (btn.dataset.tab === 'program') goToProgram(btn.dataset.programId);
+    else goTo(btn.dataset.tab);
   });
   document.getElementById('modal-close').addEventListener('click', closeModal);
   document.getElementById('modal-overlay').addEventListener('click', (e) => {
@@ -1282,6 +1306,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   render();
+  showLoadNotice();
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js').catch(() => {});

@@ -155,5 +155,23 @@ const ACTIVITIES = {
     id: 'running', name: 'Running', category: 'cardio-sport',
     primaryMuscles: ['quads', 'hamstrings', 'calves'], secondaryMuscles: ['glutes'],
     impactLevel: 'moderate', logFields: { weight: false, reps: false, duration: true, distance: true, pace: true }
+  },
+
+  // ---- Program 2 (2026-11): football injury-prevention extras ----
+  // Things the kettlebell complexes can't load. The app's muscle list has no
+  // adductors, so the Copenhagen plank carries them in its name.
+  'copenhagen-plank': {
+    id: 'copenhagen-plank', name: 'Copenhagen plank (adductors)', category: 'strength-extra',
+    primaryMuscles: ['obliques'], secondaryMuscles: ['abs', 'glutes'],
+    impactLevel: 'low', logFields: { weight: false, reps: true, duration: false, distance: false, pace: false },
+    seedVersion: 2,
+    notes: 'Forearm side plank with the top leg on a bench; lift the hips by squeezing the top leg down into the bench, elbow under the shoulder. Start in week 2: knee on the bench (short lever), 1 × 5–8 slow raises per side. After 2–3 weeks move to the ankle and build to 2–3 sets — only when the groin feels fine the next morning. If the right shoulder objects as the support arm, do lying knee squeezes on a rolled mat on that side instead.'
+  },
+  'nordic-hamstring-curl': {
+    id: 'nordic-hamstring-curl', name: 'Nordic hamstring curl', category: 'strength-extra',
+    primaryMuscles: ['hamstrings'], secondaryMuscles: ['glutes', 'calves'],
+    impactLevel: 'low', logFields: { weight: false, reps: true, duration: false, distance: false, pace: false },
+    seedVersion: 2,
+    notes: 'Kneel on a mat with the heels anchored (partner, Nordic/GHD pad, or a loaded bar at its lowest setting) and lower yourself forward as slowly as you can, catching on a box or bench in front. Start in week 3–4, after the Copenhagen plank causes no soreness: 1 × 3 over a partial range. Build to 2 × 4–6 over 4–6 weeks, increasing only when Friday morning is free of hamstring soreness. Skip it in weeks with more football than usual, such as an extra match.'
   }
 };

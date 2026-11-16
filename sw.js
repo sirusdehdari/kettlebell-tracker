@@ -1,4 +1,6 @@
-const CACHE_NAME = 'kbtracker-v1';
+const CACHE_NAME = 'kbtracker-v2';
+// Every entry must exist on the server: cache.addAll() rejects the whole
+// install if a single file 404s.
 const ASSETS = [
   './',
   './index.html',
@@ -10,8 +12,6 @@ const ASSETS = [
   './js/seed-program.js',
   './js/coverage.js',
   './js/warnings.js',
-  './js/charts.js',
-  './js/history.js',
   './js/bodymap.js',
   './js/app.js',
   './icons/icon-192.png',
@@ -19,9 +19,14 @@ const ASSETS = [
   './icons/apple-touch-icon.png'
 ];
 
+// cache: 'reload' bypasses the browser's HTTP cache (GitHub Pages lets it
+// keep files for ~10 minutes), so a new version is never installed with the
+// previous version's files.
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
   );
 });
 
