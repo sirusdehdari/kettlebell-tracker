@@ -110,6 +110,14 @@ const EXERCISES = {
     replacesExerciseId: 'curl-to-goblet-squat-thruster'
   },
 
+  // ---- Program 1 as actually run (2026-11) ----
+  // Sunday: plain floor pushups instead of KB pushups on the ball (those
+  // bother the right shoulder).
+  'pushup-ex': {
+    id: 'pushup-ex', name: 'Pushups', movementIds: ['pushup'],
+    status: 'active', blockerNote: null, replacesExerciseId: null, seedVersion: 3
+  },
+
   // ---- Program 2 (2026-11) ----
   // Monday
   'dead-stop-swing-ex': {
@@ -134,7 +142,7 @@ const EXERCISES = {
     status: 'active', blockerNote: null, replacesExerciseId: null, seedVersion: 2,
     notes: 'Same-side knee and hand on a flat bench, bell picked up from the floor beside it (one-hand deadlift, no clean). Row to the hip, squeeze 1 s, lower to a full hang. 8–10 per side — the week\'s main pull. No bench free: staggered stance with the free hand braced on the front thigh.'
   },
-  // Wednesday (one-hand swing is reused from Program 1)
+  // Wednesday (two-hand swing is reused from Program 1)
   'lateral-lunge-to-pause-squat': {
     id: 'lateral-lunge-to-pause-squat', name: 'Lateral lunge to pause squat',
     movementIds: ['lateral-lunge', 'goblet-squat'],
@@ -229,13 +237,13 @@ const WEEKLY_SCHEDULE = {
       { activityId: 'stretch-calf', timing: 'standalone', order: 8 },
       { activityId: 'stretch-chest-doorway', timing: 'standalone', order: 9 },
       { activityId: 'stretch-thread-needle', timing: 'standalone', order: 10 },
-      { activityId: 'football', timing: 'after', order: 11 }
+      { activityId: 'basketball', timing: 'after', order: 11 }
     ],
-    notes: 'Light shoulder rehab + mobility routine, active recovery, football afterward.'
+    notes: 'Light shoulder rehab + mobility routine, active recovery, basketball afterward.'
   },
   wed: {
     complex: {
-      exerciseIds: ['one-hand-swing-ex', 'curl-to-goblet-squat-thruster', 'kb-marches-ex', 'pullover-to-triceps-extension', 'one-kb-pushup'],
+      exerciseIds: ['two-hand-swing-ex', 'curl-to-goblet-squat-thruster', 'kb-marches-ex', 'pullover-to-triceps-extension', 'one-kb-pushup'],
       targetWeightKg: 16,
       focusNote: 'Legs, chest, triceps, shoulders, core. Mid-transition — see pending changes.'
     },
@@ -243,25 +251,25 @@ const WEEKLY_SCHEDULE = {
       { activityId: 'plate-pinch', timing: 'after', order: 0 },
       { activityId: 'incline-dumbbell-press', timing: 'after', order: 1 },
       { activityId: 'dead-bug', timing: 'after', order: 2 },
-      { activityId: 'dip', timing: 'after', order: 3 },
-      { activityId: 'basketball', timing: 'after', order: 4 }
+      { activityId: 'dip', timing: 'after', order: 3 }
     ],
-    notes: 'Dips optional here (see Monday note). Basketball after training.'
+    notes: 'Dips optional here (see Monday note).'
   },
   thu: {
     complex: null,
     activities: [
       { activityId: 'pogo-hop', timing: 'standalone', order: 0 },
       { activityId: 'lateral-pogo-hop', timing: 'standalone', order: 1 },
-      { activityId: 'box-step-off', timing: 'standalone', order: 2 }
+      { activityId: 'box-step-off', timing: 'standalone', order: 2 },
+      { activityId: 'football', timing: 'standalone', order: 3 }
     ],
-    notes: 'Plyometrics — short, high-intensity. Placed here (not Saturday) so it isn’t the same day as football.'
+    notes: 'Plyometrics — short, high-intensity.'
   },
   fri: {
     complex: {
-      exerciseIds: ['two-hand-swing-ex', 'goblet-squat-ex', 'two-hand-row-ex', 'wood-chop-ex', 'around-the-world-to-catch-to-reverse-lunge', 'side-bend-ex'],
+      exerciseIds: ['two-hand-swing-ex', 'goblet-squat-ex', 'gorilla-rows', 'around-the-world-to-catch', 'side-bend-ex'],
       targetWeightKg: 16,
-      focusNote: 'Legs, back, biceps, core/obliques. Complements Wednesday. (Was 20kg, lowered — wood chop was too heavy at 20kg.)'
+      focusNote: 'Legs, back, biceps, core/obliques. Complements Wednesday. (Was 20kg, lowered — wood chop was too heavy at 20kg.) Gorilla rows can be swapped for ballistic rows some weeks.'
     },
     activities: [
       { activityId: 'plank-with-saw', timing: 'after', order: 0 },
@@ -282,13 +290,15 @@ const WEEKLY_SCHEDULE = {
   },
   sun: {
     complex: {
-      exerciseIds: ['clean-to-reverse-lunge', 'rotational-thruster-ex', 'upright-row-to-press', 'halo-to-pullover-to-triceps-extension', 'kb-pushups-on-ball'],
+      exerciseIds: ['clean-to-reverse-lunge', 'rotational-thruster-ex', 'upright-row-to-press', 'halo-to-pullover-to-triceps-extension', 'pushup-ex'],
       targetWeightKg: 12,
-      focusNote: 'Shoulders, chest, triceps — deliberately light going into Monday.'
+      focusNote: 'Shoulders, chest, triceps — deliberately light going into Monday.',
+      positionOverride: 'kneeling'
     },
     activities: [
       { activityId: 'incline-dumbbell-press', timing: 'after', order: 0 },
-      { activityId: 'dumbbell-flyes', timing: 'after', order: 1 }
+      { activityId: 'dumbbell-flyes', timing: 'after', order: 1 },
+      { activityId: 'football', timing: 'standalone', order: 2 }
     ],
     notes: 'Dumbbell flyes optional, lower priority — only if there’s time.'
   }
@@ -326,9 +336,9 @@ const PROGRAM_2_COMPLEXES = {
     positionOverride: null
   },
   wed: {
-    exerciseIds: ['one-hand-swing-ex', 'lateral-lunge-to-pause-squat', 'floor-press-to-skull-crusher-to-situp-to-press', 'tempo-pushup-ex'],
+    exerciseIds: ['two-hand-swing-ex', 'lateral-lunge-to-pause-squat', 'floor-press-to-skull-crusher-to-situp-to-press', 'tempo-pushup-ex'],
     targetWeightKg: 16,
-    focusNote: 'Legs in a new (sideways) plane, then chest, triceps, shoulders and abs on the floor — no back or biceps today, so Monday\'s pulling recovers. Swings: 5 per hand, swapping hands on the handle at chest height (10 swings); if one-hand swings bother the right shoulder, do 10 two-hand swings. Set up next to something solid to hook your feet under for the sit-ups.',
+    focusNote: 'Legs in a new (sideways) plane, then chest, triceps, shoulders and abs on the floor — no back or biceps today, so Monday\'s pulling recovers. Swings: two-hand, 10 a round, with the same bell as the rest. Set up next to something solid to hook your feet under for the sit-ups.',
     positionOverride: null
   },
   fri: {
@@ -340,7 +350,7 @@ const PROGRAM_2_COMPLEXES = {
   sun: {
     exerciseIds: ['halo-to-press-out', 'half-kneeling-chop-ex', 'squeeze-press-ex', 'pushup-to-y-t-w'],
     targetWeightKg: 12,
-    focusNote: 'Light day, all on the knees or the floor: shoulders, chest and triceps, diagonal core and upper-back balance. Unlike Program 1, no legs (after Saturday\'s football), no back or biceps (after the chins) and no overhead pressing before Monday — on purpose.',
+    focusNote: 'Light day, all on the knees or the floor: shoulders, chest and triceps, diagonal core and upper-back balance. Unlike Program 1, no legs (football on Saturday and Sunday), no back or biceps (after the chins) and no overhead pressing before Monday — on purpose.',
     positionOverride: null
   }
 };
@@ -349,13 +359,59 @@ const PROGRAM_2_COMPLEXES = {
 // { dayKey, activityId, replaceActivityId: id | null, timing }.
 // Two football injury-prevention extras that train what kettlebells can't
 // load (adductors; hamstrings as knee flexors). Their start is staggered.
+// Monday, after the complex: the day furthest from the football on Thursday
+// and at the weekend (soreness from both peaks a day or two later).
 const PROGRAM_2_ACTIVITY_CHANGES = [
-  { dayKey: 'thu', activityId: 'copenhagen-plank', replaceActivityId: null, timing: 'after' },
-  { dayKey: 'thu', activityId: 'nordic-hamstring-curl', replaceActivityId: null, timing: 'after' }
+  { dayKey: 'mon', activityId: 'copenhagen-plank', replaceActivityId: null, timing: 'after' },
+  { dayKey: 'mon', activityId: 'nordic-hamstring-curl', replaceActivityId: null, timing: 'after' }
 ];
 
 // Appended to the copied day note in Program 2, so the staggered start is
 // visible on the day page without opening How to.
 const PROGRAM_2_DAY_NOTES = {
-  thu: 'New in Program 2: nothing extra in week 1. Copenhagen plank from week 2 (knee on the bench, 1 × 5–8 per side); Nordic curls from week 3–4 (1 × 3, partial range), only once the Copenhagen leaves no soreness. Details under How to.'
+  mon: 'New in Program 2: nothing extra in week 1. Copenhagen plank from week 2 (knee on the bench, 1 × 5–8 per side); Nordic curls from week 3–4 (1 × 3, partial range), only once the Copenhagen leaves no soreness. Details under How to.'
 };
+
+// ---- PROGRAM UPDATES ----
+// One-time edits to programs that already exist on a phone (app.js:
+// applyProgramUpdates). The week above only seeds fresh installs and Program
+// 2 is built once, so a change to either reaches existing data only through
+// an update here. Each update runs once per install (its id is recorded in
+// meta.appliedUpdates); fresh installs start with every id recorded, because
+// the seeds above already include the changes. A step only acts when the day
+// still looks as expected, so nothing changed in the app since is overwritten.
+// Step: { programs: [program ids], day, op, ...fields, ifHasActivity?: [ids] }
+//   replaceExercise {from, to}   replaceActivity {from, to}   addActivity {activityId, timing}
+//   removeActivity {activityId}  moveActivity {activityId, toDay}
+//   replaceNoteText {from, to}   appendNote {text}   replaceFocusText {from, to}   appendFocusText {text}
+const PROGRAM_UPDATES = [
+  {
+    // Program 1 as actually run, the real cardio week (basketball Tuesday;
+    // football Thursday, Saturday and Sunday), Program 2's Wednesday swing to
+    // two hands (one bell per complex), and Program 2's Copenhagen plank and
+    // Nordic curls moved from Thursday to Monday.
+    id: '2026-11-program-1-as-run',
+    steps: [
+      { programs: ['program-1'], day: 'wed', op: 'replaceExercise', from: 'one-hand-swing-ex', to: 'two-hand-swing-ex' },
+      { programs: ['program-1'], day: 'fri', op: 'replaceExercise', from: 'two-hand-row-ex', to: 'gorilla-rows' },
+      { programs: ['program-1'], day: 'fri', op: 'appendFocusText', text: 'Gorilla rows can be swapped for ballistic rows some weeks.' },
+      { programs: ['program-1'], day: 'sun', op: 'replaceExercise', from: 'kb-pushups-on-ball', to: 'pushup-ex' },
+      { programs: ['program-1', 'program-2'], day: 'tue', op: 'replaceActivity', from: 'football', to: 'basketball' },
+      { programs: ['program-1', 'program-2'], day: 'tue', op: 'addActivity', activityId: 'basketball', timing: 'after' },
+      { programs: ['program-1', 'program-2'], day: 'tue', op: 'replaceNoteText', from: 'football afterward', to: 'basketball afterward' },
+      { programs: ['program-1', 'program-2'], day: 'wed', op: 'removeActivity', activityId: 'basketball' },
+      { programs: ['program-1', 'program-2'], day: 'wed', op: 'replaceNoteText', from: 'Basketball after training.', to: '' },
+      { programs: ['program-1', 'program-2'], day: 'thu', op: 'addActivity', activityId: 'football', timing: 'standalone' },
+      { programs: ['program-1', 'program-2'], day: 'thu', op: 'replaceNoteText', from: 'Placed here (not Saturday) so it isn’t the same day as football.', to: '' },
+      { programs: ['program-1', 'program-2'], day: 'sat', op: 'addActivity', activityId: 'football', timing: 'after' },
+      { programs: ['program-1', 'program-2'], day: 'sun', op: 'addActivity', activityId: 'football', timing: 'standalone' },
+      { programs: ['program-2'], day: 'wed', op: 'replaceExercise', from: 'one-hand-swing-ex', to: 'two-hand-swing-ex' },
+      { programs: ['program-2'], day: 'wed', op: 'replaceFocusText', from: 'Swings: 5 per hand, swapping hands on the handle at chest height (10 swings); if one-hand swings bother the right shoulder, do 10 two-hand swings.', to: 'Swings: two-hand, 10 a round, with the same bell as the rest.' },
+      { programs: ['program-2'], day: 'sun', op: 'replaceFocusText', from: 'no legs (after Saturday\'s football)', to: 'no legs (football on Saturday and Sunday)' },
+      { programs: ['program-2'], day: 'thu', op: 'moveActivity', activityId: 'copenhagen-plank', toDay: 'mon' },
+      { programs: ['program-2'], day: 'thu', op: 'moveActivity', activityId: 'nordic-hamstring-curl', toDay: 'mon' },
+      { programs: ['program-2'], day: 'thu', op: 'replaceNoteText', from: 'New in Program 2: nothing extra in week 1. Copenhagen plank from week 2 (knee on the bench, 1 × 5–8 per side); Nordic curls from week 3–4 (1 × 3, partial range), only once the Copenhagen leaves no soreness. Details under How to.', to: '' },
+      { programs: ['program-2'], day: 'mon', op: 'appendNote', text: PROGRAM_2_DAY_NOTES.mon, ifHasActivity: ['copenhagen-plank', 'nordic-hamstring-curl'] }
+    ]
+  }
+];

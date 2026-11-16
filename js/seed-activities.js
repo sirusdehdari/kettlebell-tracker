@@ -172,6 +172,6 @@ const ACTIVITIES = {
     primaryMuscles: ['hamstrings'], secondaryMuscles: ['glutes', 'calves'],
     impactLevel: 'low', logFields: { weight: false, reps: true, duration: false, distance: false, pace: false },
     seedVersion: 2,
-    notes: 'Kneel on a mat with the heels anchored (partner, Nordic/GHD pad, or a loaded bar at its lowest setting) and lower yourself forward as slowly as you can, catching on a box or bench in front. Start in week 3–4, after the Copenhagen plank causes no soreness: 1 × 3 over a partial range. Build to 2 × 4–6 over 4–6 weeks, increasing only when Friday morning is free of hamstring soreness. Skip it in weeks with more football than usual, such as an extra match.'
+    notes: 'Kneel on a mat with the heels anchored (partner, Nordic/GHD pad, or a loaded bar at its lowest setting) and lower yourself forward as slowly as you can, catching on a box or bench in front. Start in week 3–4, after the Copenhagen plank causes no soreness: 1 × 3 over a partial range. Build to 2 × 4–6 over 4–6 weeks, increasing only when the next morning is free of hamstring soreness. Skip it in weeks with more football than usual, such as an extra match.'
   }
 };

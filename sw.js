@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kbtracker-v2';
+const CACHE_NAME = 'kbtracker-v3';
 // Every entry must exist on the server: cache.addAll() rejects the whole
 // install if a single file 404s.
 const ASSETS = [

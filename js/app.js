@@ -4,7 +4,8 @@ const STORAGE_KEY = 'kbapp_state_v1';
 // Per-device view preference (which tab was open last) — not program data,
 // so it lives outside the backed-up state.
 const UI_KEY = 'kbapp_ui_v1';
-const SCHEMA_VERSION = 2;
+// v3: v2 plus meta.appliedUpdates (PROGRAM_UPDATES applied to existing data).
+const SCHEMA_VERSION = 3;
 const PRE_MIGRATION_BACKUP_KEY = `kbapp_backup_before_v${SCHEMA_VERSION}`;
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
@@ -20,11 +21,12 @@ const LOCKED_NOTICE = 'Your saved data could not be read, and there was no room 
 // The service worker serves files one by one (network first, its cache when
 // that fails), so a bad connection during an update can leave a script from
 // the previous release — or none — next to this app.js, which would then stop
-// on a blank page. Check for what this release needs from each script; if
-// anything is missing, touch no data, say so, and reload when reopened.
+// on a blank page. Check for what this release needs from each script, and
+// that the seed files belong together; if not, touch no data, say so, and
+// reload when reopened.
 if ([typeof DAY_ORDER, typeof MOVEMENTS, typeof ACTIVITIES, typeof EXERCISES, typeof PROGRAM_2_COMPLEXES,
-  typeof PROGRAM_2_ACTIVITY_CHANGES, typeof PROGRAM_2_DAY_NOTES, typeof getWeeklyCoverage, typeof getAllWarnings,
-  typeof renderBodyMapSVG].includes('undefined')) {
+  typeof PROGRAM_2_ACTIVITY_CHANGES, typeof PROGRAM_2_DAY_NOTES, typeof PROGRAM_UPDATES, typeof getWeeklyCoverage,
+  typeof getAllWarnings, typeof renderBodyMapSVG].includes('undefined') || !seedFilesBelongTogether()) {
   document.addEventListener('DOMContentLoaded', () => {
     const view = document.getElementById('view');
     if (view) view.innerHTML = '<div class="save-warning">Part of the update didn\'t load. Close the app and open it again with a connection — your data is untouched.</div>';
@@ -34,6 +36,23 @@ if ([typeof DAY_ORDER, typeof MOVEMENTS, typeof ACTIVITIES, typeof EXERCISES, ty
 }
 
 let state = loadState();
+
+// Everything seed-program.js refers to exists in the loaded
+// seed-movements.js and seed-activities.js (an older copy of either lacks
+// what this release added). Only reads the seed globals, so it is safe to call
+// before anything else in this file has run; anything unexpected counts as no.
+function seedFilesBelongTogether() {
+  try {
+    const activityIds = [
+      ...Object.values(WEEKLY_SCHEDULE).flatMap(day => (day.activities || []).map(a => a.activityId)),
+      ...PROGRAM_2_ACTIVITY_CHANGES.flatMap(c => [c.activityId, c.replaceActivityId]).filter(Boolean)
+    ];
+    return Object.values(EXERCISES).every(e => (e.movementIds || []).every(id => MOVEMENTS[id]))
+      && activityIds.every(id => ACTIVITIES[id]);
+  } catch (e) {
+    return false;
+  }
+}
 
 // ---------- STATE: LOAD / MIGRATE / SAVE ----------
 
@@ -130,10 +149,15 @@ function mergeSeedLibrary(s) {
       if (neverOffered && !s[group][item.id]) s[group][item.id] = clone(item);
     });
   });
-  // Activities can't be edited in the app, so the seed's field config is
-  // authoritative — this is how older installs pick up e.g. the reps field.
+  // Activities can't be edited in the app, so the seed's field config and
+  // how-to are authoritative — this is how older installs pick up e.g. the
+  // reps field or a reworded how-to.
   Object.values(ACTIVITIES).forEach(a => {
-    if (s.activities[a.id]) s.activities[a.id].logFields = clone(a.logFields);
+    const mine = s.activities[a.id];
+    if (!mine) return;
+    mine.logFields = clone(a.logFields);
+    if (a.notes) mine.notes = a.notes;
+    else delete mine.notes;
   });
   s.meta.seededIds = allSeedIds();
 }
@@ -173,10 +197,113 @@ function migrateState(s) {
     s.programs.push({ id: 'program-2', name: 'Program 2', schedule: buildProgram2Schedule(base.schedule) });
   }
   normalizeDays(s);
+  applyProgramUpdates(s);
   repairProgramReferences(s);
   keepLegacyKeys(s);
   s.meta.schemaVersion = SCHEMA_VERSION;
   return s;
+}
+
+// One-time edits to programs that already exist (PROGRAM_UPDATES in
+// seed-program.js). Each update runs once per install and is recorded by id
+// in meta.appliedUpdates (kept by older releases too, so a rollback can't
+// make one run twice). Must never throw (see repairProgramReferences): a step
+// that can't apply leaves its day as it is.
+function applyProgramUpdates(s) {
+  const applied = new Set(Array.isArray(s.meta.appliedUpdates) ? s.meta.appliedUpdates : []);
+  PROGRAM_UPDATES.forEach(update => {
+    if (applied.has(update.id)) return;
+    update.steps.forEach(step => step.programs.forEach(programId => {
+      const program = s.programs.find(p => p && p.id === programId);
+      if (!program || !program.schedule || !program.schedule[step.day]) return;
+      try { applyProgramStep(program.schedule, step); } catch (e) { /* skip this step */ }
+    }));
+    applied.add(update.id);
+  });
+  s.meta.appliedUpdates = [...applied];
+}
+
+// One step: acts only when the day still looks as expected (the exercise to
+// replace is there, the activity to add isn't, ...).
+function applyProgramStep(schedule, step) {
+  const day = schedule[step.day];
+  const has = (d, id) => d.activities.some(a => a && a.activityId === id);
+  const at = id => day.activities.findIndex(a => a && a.activityId === id);
+  const renumber = d => d.activities.forEach((a, i) => { if (a) a.order = i; });
+  if (step.ifHasActivity && !step.ifHasActivity.some(id => has(day, id))) return;
+  const exerciseIds = day.complex && Array.isArray(day.complex.exerciseIds) ? day.complex.exerciseIds : [];
+  switch (step.op) {
+    case 'replaceExercise': {
+      const i = exerciseIds.indexOf(step.from);
+      if (i < 0) return;
+      if (exerciseIds.includes(step.to)) exerciseIds.splice(i, 1);
+      else {
+        // Same row, new name: kg/reps jotted on it belong to it.
+        exerciseIds[i] = step.to;
+        const from = `ex:${step.from}`, to = `ex:${step.to}`;
+        if (day.memos[from] && !day.memos[to]) day.memos[to] = day.memos[from];
+      }
+      break;
+    }
+    case 'replaceActivity': {
+      const i = at(step.from);
+      if (i < 0) return;
+      if (has(day, step.to)) { day.activities.splice(i, 1); renumber(day); }
+      else day.activities[i] = { ...day.activities[i], activityId: step.to };
+      break;
+    }
+    case 'addActivity':
+      if (has(day, step.activityId)) return;
+      day.activities.push({ activityId: step.activityId, timing: step.timing || 'after', order: 0 });
+      renumber(day);
+      break;
+    case 'removeActivity': {
+      const i = at(step.activityId);
+      if (i < 0) return;
+      day.activities.splice(i, 1);
+      renumber(day);
+      break;
+    }
+    case 'moveActivity': {
+      const target = schedule[step.toDay];
+      const i = at(step.activityId);
+      if (i < 0 || !target || has(target, step.activityId)) return;
+      target.activities.push(day.activities.splice(i, 1)[0]);
+      const key = `act:${step.activityId}`;
+      if (day.memos[key]) { target.memos[key] = day.memos[key]; delete day.memos[key]; }
+      renumber(day);
+      renumber(target);
+      break;
+    }
+    case 'replaceNoteText':
+      day.notes = replaceTextOnce(day.notes, step.from, step.to);
+      break;
+    case 'appendNote':
+      if (!day.notes.includes(step.text)) day.notes = [day.notes, step.text].filter(Boolean).join(' ');
+      break;
+    case 'replaceFocusText':
+      if (day.complex && typeof day.complex.focusNote === 'string') day.complex.focusNote = replaceTextOnce(day.complex.focusNote, step.from, step.to);
+      break;
+    case 'appendFocusText': {
+      if (!day.complex) return;
+      const focus = typeof day.complex.focusNote === 'string' ? day.complex.focusNote : '';
+      if (!focus.includes(step.text)) day.complex.focusNote = [focus, step.text].filter(Boolean).join(' ');
+      break;
+    }
+    default:
+      return;
+  }
+  pruneMemos(day);
+}
+
+// Replaces the first `from`; removing it (to === '') also takes the space in
+// front, so "A. B." minus "B." reads "A.".
+function replaceTextOnce(text, from, to) {
+  if (typeof text !== 'string') return text;
+  const target = to === '' && text.includes(` ${from}`) ? ` ${from}` : from;
+  const i = text.indexOf(target);
+  if (i < 0) return text;
+  return (text.slice(0, i) + to + text.slice(i + target.length)).trim();
 }
 
 // The pre-programs app only loads data that has `schedule` (and saves unknown
@@ -192,7 +319,8 @@ function keepLegacyKeys(s) {
 function freshState() {
   const program1 = clone(WEEKLY_SCHEDULE);
   const s = {
-    meta: { schemaVersion: SCHEMA_VERSION, seededIds: allSeedIds() },
+    // The seeds already include every program update.
+    meta: { schemaVersion: SCHEMA_VERSION, seededIds: allSeedIds(), appliedUpdates: PROGRAM_UPDATES.map(u => u.id) },
     movements: clone(MOVEMENTS),
     exercises: clone(EXERCISES),
     activities: clone(ACTIVITIES),
